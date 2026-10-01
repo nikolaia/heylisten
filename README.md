@@ -24,7 +24,11 @@ title: "Kundemøte"
 date: 2026-10-01
 start: "09:30"
 duration_min: 47
-speakers: [Meg, Taler 1, Taler 2]
+speakers: [Meg, Kari, Taler 2]
+speaker_names:
+  - name: "Kari"
+    label: "Taler 1"
+    evidence: "Kari, kan du starte med testingen"
 type: meeting
 tags: [møte]
 ---
@@ -122,6 +126,7 @@ flowchart LR
 - **Two tracks.** The mic is you (`Meg`) and system audio is everyone else (`Andre`), so the live view can tell them apart from the start.
 - **Live.** Each track is cut into chunks at pauses and transcribed as you talk. After stop, only speaker labelling and the summary are left.
 - **Speakers.** After stop, voices on both tracks are told apart and numbered `Taler 1`, `Taler 2`… in order of first appearance. If the mic hears only one voice, it stays `Meg`. In a meeting room where several people share a mic, every voice becomes a `Taler`, because heyListen can't know which one is you.
+- **Names.** When the meeting makes it clear who someone is, `Taler 2` becomes `Kari`. That means they introduce themselves ("dette er Kari"), or answer right after being addressed ("Kari, kan du…?"), or are thanked right after speaking ("Takk, Kari"). Code finds these and works out who is who; Borealis only confirms which words are names. Anything ambiguous stays `Taler N`. Each name is listed in the note's frontmatter with the label it replaced and the sentence it came from, so a wrong name is easy to fix by hand or by asking an LLM to replace it throughout. Names are found per meeting only, and nothing about anyone's voice is kept.
 - **Language.** Always Norwegian. NB-Whisper translates English speech into Norwegian rather than transcribing it.
 - **Summary.** By default heyListen starts llama.cpp's `llama-server` on localhost just for the summary, then stops it, so the 7 GB model is only in memory while it's needed.
 - **If the summary fails** (for example the model isn't downloaded, or Ollama is down), the note is written without a summary, the audio is kept, and `heylisten process <id>` retries later.

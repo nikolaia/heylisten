@@ -13,9 +13,10 @@ use crate::diarize;
 use crate::live::{self, Chunker};
 use crate::meeting::{Meeting, Track};
 use crate::note::{self, Summary};
-use crate::summarize;
+use crate::names;
+use crate::summarize::{self, Writer};
 use crate::transcribe::Transcriber;
-use crate::transcript::Transcript;
+use crate::transcript::{Transcript, Who};
 
 pub enum Event {
     LoadingModel,
@@ -26,12 +27,17 @@ pub enum Event {
     SkippedSilentTrack(Track),
     /// `ollama_url` isn't on this machine: the transcript is about to leave it.
     SendingOffMachine(String),
+    /// Looking for speakers' names in the transcript.
+    FindingNames,
+    NamesFound(Vec<String>),
+    /// The note keeps "Taler N".
+    NamesFailed(String),
     Summarizing { part: usize, parts: usize },
     /// The note is written without a summary, and the audio is kept so `process` can retry.
     SummaryFailed(String),
     NoteWritten(PathBuf),
     AudioDeleted,
-    /// How long a step took: "transcription", "speakers" or "summary".
+    /// How long a step took: "transcription", "speakers" or "names and summary".
     Took(&'static str, Duration),
 }
 
@@ -107,18 +113,32 @@ pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, on_event: O
     }
     diarize::renumber(&mut transcript.segments);
     on_event(Event::Took("speakers", started.elapsed()));
-    fs::write(meeting.dir().join("transcript.json"), serde_json::to_string_pretty(&transcript)?)?;
 
     if config.summary_engine == SummaryEngine::Ollama && !config.ollama_is_local() {
         on_event(Event::SendingOffMachine(config.ollama_url.clone()));
     }
-    on_event(Event::Summarizing { part: 1, parts: 1 });
+    // One language model for both: names first, so the summary can use them.
     let started = Instant::now();
-    let summary = summarize::summarize(config, &transcript, |part, parts| on_event(Event::Summarizing { part, parts }))
-        .map(|text| Summary { model: summarize::model_name(config).to_string(), text })
-        .inspect_err(|e| on_event(Event::SummaryFailed(format!("{e:#}"))))
-        .ok();
-    on_event(Event::Took("summary", started.elapsed()));
+    let summary = (|| -> Result<String> {
+        let writer = Writer::open(config, &transcript)?;
+        if transcript.people().iter().any(|w| matches!(w, Who::Speaker(_))) {
+            on_event(Event::FindingNames);
+            match names::find(&writer, &transcript, config.debug) {
+                Ok(found) => {
+                    on_event(Event::NamesFound(found.values().map(|n| n.name.clone()).collect()));
+                    transcript.names = found;
+                }
+                Err(e) => on_event(Event::NamesFailed(format!("{e:#}"))),
+            }
+        }
+        on_event(Event::Summarizing { part: 1, parts: 1 });
+        writer.summarize(&transcript, |part, parts| on_event(Event::Summarizing { part, parts }))
+    })()
+    .map(|text| Summary { model: summarize::model_name(config).to_string(), text })
+    .inspect_err(|e| on_event(Event::SummaryFailed(format!("{e:#}"))))
+    .ok();
+    on_event(Event::Took("names and summary", started.elapsed()));
+    fs::write(meeting.dir().join("transcript.json"), serde_json::to_string_pretty(&transcript)?)?;
 
     let model_name = config.whisper_model.file_stem().and_then(|s| s.to_str()).unwrap_or("whisper");
     let contents = note::render(meeting, &transcript, model_name, summary.as_ref());

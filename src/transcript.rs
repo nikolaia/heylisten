@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Who said something. See CONTEXT.md: Me, Others, Speaker.
@@ -31,6 +33,17 @@ pub struct Segment {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Transcript {
     pub segments: Vec<Segment>,
+    /// Names found for speakers in this meeting, by speaker number. Only for this meeting:
+    /// nothing about anyone's voice is kept.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub names: BTreeMap<u32, Naming>,
+}
+
+/// A speaker's name, and the line in the transcript it was found from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Naming {
+    pub name: String,
+    pub evidence: String,
 }
 
 /// Consecutive segments from the same person, joined.
@@ -48,7 +61,20 @@ impl Transcript {
         let echoes: Vec<bool> = segments.iter().map(|s| is_echo(s, &segments)).collect();
         let mut echoes = echoes.into_iter();
         segments.retain(|_| !echoes.next().unwrap());
-        Transcript { segments }
+        Transcript { segments, names: BTreeMap::new() }
+    }
+
+    /// How someone is shown: their name if it was found, otherwise "Meg", "Andre", "Taler N".
+    pub fn label(&self, who: Who) -> String {
+        match who {
+            Who::Speaker(n) => self.names.get(&n).map_or_else(|| who.label(), |n| n.name.clone()),
+            _ => who.label(),
+        }
+    }
+
+    /// The transcript as plain text, "Navn: tekst" per paragraph.
+    pub fn text(&self) -> String {
+        self.paragraphs().iter().map(|p| format!("{}: {}", self.label(p.who), p.text)).collect::<Vec<_>>().join("\n\n")
     }
 
     pub fn paragraphs(&self) -> Vec<Paragraph> {

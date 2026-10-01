@@ -465,6 +465,7 @@ fn spawn_stop(config: Config, proxy: EventLoopProxy<UserEvent>) {
                 let step = match e {
                     PipelineEvent::LoadingModel | PipelineEvent::Transcribing { .. } => "Transcribing…",
                     PipelineEvent::Diarizing(_) => "Telling speakers apart…",
+                    PipelineEvent::FindingNames => "Finding names…",
                     PipelineEvent::Summarizing { .. } => "Summarizing…",
                     _ => return,
                 };

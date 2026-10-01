@@ -42,7 +42,7 @@ pub fn context_length(url: &str, model: &str) -> Result<Option<u64>> {
 }
 
 /// One non-streaming chat turn: system prompt + user message → reply.
-pub fn chat(url: &str, model: &str, num_ctx: u64, system: &str, user: &str) -> Result<String> {
+pub fn chat(url: &str, model: &str, num_ctx: u64, system: &str, user: &str, json: bool) -> Result<String> {
     #[derive(Deserialize)]
     struct Reply {
         message: Message,
@@ -51,7 +51,7 @@ pub fn chat(url: &str, model: &str, num_ctx: u64, system: &str, user: &str) -> R
     struct Message {
         content: String,
     }
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "stream": false,
         "options": { "num_ctx": num_ctx, "temperature": 0.2 },
@@ -60,6 +60,9 @@ pub fn chat(url: &str, model: &str, num_ctx: u64, system: &str, user: &str) -> R
             { "role": "user", "content": user },
         ],
     });
+    if json {
+        body["format"] = serde_json::json!("json");
+    }
     // A long meeting on a 12B model can take minutes.
     let reply: Reply = agent(Duration::from_secs(30 * 60))
         .post(format!("{}/api/chat", url.trim_end_matches('/')))

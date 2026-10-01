@@ -29,7 +29,7 @@ Everyone heard on the system track, before diarization tells them apart.
 _Avoid_: Remote, participants, them
 
 **Speaker**:
-One distinct voice identified by diarization, on either track. Speakers on different tracks are always different people.
+One distinct voice identified by diarization, on either track. Speakers on different tracks are always different people. A speaker gets a name only when the meeting itself makes it clear (an introduction, being addressed, being thanked); nothing carries over between meetings.
 _Avoid_: Participant, attendee, voice
 
 ### Output

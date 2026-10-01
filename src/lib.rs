@@ -8,6 +8,7 @@ pub mod doctor;
 pub mod engine;
 pub mod live;
 pub mod meeting;
+pub mod names;
 pub mod note;
 pub mod ollama;
 pub mod pipeline;

@@ -129,7 +129,7 @@ impl Server {
     }
 
     /// One chat turn: system prompt + user message → reply.
-    pub fn chat(&self, system: &str, user: &str) -> Result<String> {
+    pub fn chat(&self, system: &str, user: &str, json: bool) -> Result<String> {
         #[derive(Deserialize)]
         struct Reply {
             choices: Vec<Choice>,
@@ -142,13 +142,16 @@ impl Server {
         struct Message {
             content: String,
         }
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "temperature": 0.2,
             "messages": [
                 { "role": "system", "content": system },
                 { "role": "user", "content": user },
             ],
         });
+        if json {
+            body["response_format"] = serde_json::json!({ "type": "json_object" });
+        }
         let reply: Reply = agent(Duration::from_secs(30 * 60))
             .post(format!("http://127.0.0.1:{}/v1/chat/completions", self.port))
             .header("Authorization", format!("Bearer {}", self.key))

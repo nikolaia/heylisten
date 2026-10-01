@@ -180,6 +180,10 @@ fn print_event(meeting_id: &str, event: Event) {
         Event::SendingOffMachine(url) => {
             eprintln!("{}", red(&format!("WARNING: sending the transcript to {url}, which is not this machine")))
         }
+        Event::FindingNames => eprintln!("Looking for speakers' names…"),
+        Event::NamesFound(names) if names.is_empty() => eprintln!("  no names clear enough; speakers stay Taler N"),
+        Event::NamesFound(names) => eprintln!("  found: {}", names.join(", ")),
+        Event::NamesFailed(why) => eprintln!("  couldn't look for names ({why}); speakers stay Taler N"),
         Event::Summarizing { part: 1, parts: 1 } => eprintln!("Summarizing…"),
         Event::Summarizing { part, parts } => eprintln!("Summarizing part {part}/{parts}…"),
         Event::SummaryFailed(why) => {

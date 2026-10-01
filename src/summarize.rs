@@ -14,69 +14,85 @@ const MAX_CTX: u64 = 32_768;
 const MIN_CTX: u64 = 8_192;
 /// Room left for the model's answer.
 const ANSWER_TOKENS: u64 = 2_048;
+/// Room for the prompt, when sizing the context.
+const PROMPT_ALLOWANCE: u64 = 4_000;
 /// Rough Norwegian token estimate. Errs on the safe side.
 const CHARS_PER_TOKEN: u64 = 3;
 
-/// Whoever writes the summary.
-enum Writer<'a> {
+/// The language model for this meeting: started once, then used to find speakers' names and
+/// to write the summary.
+pub struct Writer<'a> {
+    engine: Engine<'a>,
+    num_ctx: u64,
+}
+
+enum Engine<'a> {
     Builtin(engine::Server),
     Ollama { url: &'a str, model: &'a str },
 }
 
-impl Writer<'_> {
-    fn chat(&self, num_ctx: u64, system: &str, user: &str) -> Result<String> {
-        match self {
-            Writer::Builtin(server) => server.chat(system, user),
-            Writer::Ollama { url, model } => ollama::chat(url, model, num_ctx, system, user),
+impl<'a> Writer<'a> {
+    /// Starts the configured engine with as much context as this transcript needs: memory for
+    /// it is reserved up front, and a 32k window costs gigabytes a short meeting doesn't need.
+    pub fn open(config: &'a Config, transcript: &Transcript) -> Result<Writer<'a>> {
+        let transcript_chars: usize = transcript.segments.iter().map(|s| s.text.len() + 16).sum();
+        let needed = (PROMPT_ALLOWANCE + transcript_chars as u64) / CHARS_PER_TOKEN + ANSWER_TOKENS;
+        let wanted = needed.div_ceil(4_096) * 4_096;
+        Ok(match config.summary_engine {
+            SummaryEngine::Builtin => {
+                let model = engine::borealis_path().context("the summary model isn't downloaded yet (run heylisten setup)")?;
+                let num_ctx = wanted.clamp(MIN_CTX, MAX_CTX);
+                Writer { engine: Engine::Builtin(engine::Server::start(&model, num_ctx)?), num_ctx }
+            }
+            SummaryEngine::Ollama => {
+                let (url, model) = (config.ollama_url.as_str(), config.ollama_model.as_str());
+                let num_ctx = ollama::context_length(url, model)
+                    .with_context(|| format!("Ollama not reachable at {url}, or model {model} not pulled"))?
+                    .unwrap_or(8_192)
+                    .min(wanted.clamp(MIN_CTX, MAX_CTX));
+                Writer { engine: Engine::Ollama { url, model }, num_ctx }
+            }
+        })
+    }
+
+    /// One chat turn. With `json`, the reply is constrained to a JSON object.
+    pub fn chat(&self, system: &str, user: &str, json: bool) -> Result<String> {
+        match &self.engine {
+            Engine::Builtin(server) => server.chat(system, user, json),
+            Engine::Ollama { url, model } => ollama::chat(url, model, self.num_ctx, system, user, json),
         }
     }
-}
 
-/// Returns the summary Markdown. `on_part(i, n)` is called before each part when the transcript is split.
-pub fn summarize(config: &Config, transcript: &Transcript, mut on_part: impl FnMut(usize, usize)) -> Result<String> {
-    let path = prompt_path();
-    let prompt = fs::read_to_string(&path).with_context(|| format!("can't read {}", path.display()))?;
-    // Only as much context as this transcript needs: memory for it is reserved up front, and
-    // a 32k window costs gigabytes a short meeting doesn't need.
-    let transcript_chars: usize = transcript.segments.iter().map(|s| s.text.len() + 16).sum();
-    let needed = (prompt.len() + transcript_chars) as u64 / CHARS_PER_TOKEN + ANSWER_TOKENS;
-    let wanted = needed.div_ceil(4_096) * 4_096;
-    let (writer, num_ctx) = match config.summary_engine {
-        SummaryEngine::Builtin => {
-            let model = engine::borealis_path().context("the summary model isn't downloaded yet (run heylisten setup)")?;
-            let num_ctx = wanted.clamp(MIN_CTX, MAX_CTX);
-            (Writer::Builtin(engine::Server::start(&model, num_ctx)?), num_ctx)
-        }
-        SummaryEngine::Ollama => {
-            let (url, model) = (config.ollama_url.as_str(), config.ollama_model.as_str());
-            let num_ctx = ollama::context_length(url, model)
-                .with_context(|| format!("Ollama not reachable at {url}, or model {model} not pulled"))?
-                .unwrap_or(8_192)
-                .min(wanted.clamp(MIN_CTX, MAX_CTX));
-            (Writer::Ollama { url, model }, num_ctx)
-        }
-    };
-    let budget_chars = num_ctx.saturating_sub(prompt.len() as u64 / CHARS_PER_TOKEN + ANSWER_TOKENS) * CHARS_PER_TOKEN;
-
-    let parts = split(&transcript.segments, budget_chars as usize);
-    if parts.len() == 1 {
-        return writer.chat(num_ctx, &prompt, &format!("Transkripsjon:\n\n{}", parts[0]));
+    /// How much transcript fits in one request, after `prompt` and room for the answer.
+    pub fn budget_chars(&self, prompt: &str) -> usize {
+        (self.num_ctx.saturating_sub(prompt.len() as u64 / CHARS_PER_TOKEN + ANSWER_TOKENS) * CHARS_PER_TOKEN) as usize
     }
-    let n = parts.len();
-    let mut summaries = Vec::new();
-    for (i, part) in parts.iter().enumerate() {
-        on_part(i + 1, n);
+
+    /// Returns the summary Markdown. `on_part(i, n)` is called before each part when the
+    /// transcript is split.
+    pub fn summarize(&self, transcript: &Transcript, mut on_part: impl FnMut(usize, usize)) -> Result<String> {
+        let path = prompt_path();
+        let prompt = fs::read_to_string(&path).with_context(|| format!("can't read {}", path.display()))?;
+        let parts = split(transcript, self.budget_chars(&prompt));
+        if parts.len() == 1 {
+            return self.chat(&prompt, &format!("Transkripsjon:\n\n{}", parts[0]), false);
+        }
+        let n = parts.len();
+        let mut summaries = Vec::new();
+        for (i, part) in parts.iter().enumerate() {
+            on_part(i + 1, n);
+            let user = format!(
+                "Dette er del {} av {n} av et langt møte. Lag referat bare for denne delen.\n\nTranskripsjon:\n\n{part}",
+                i + 1
+            );
+            summaries.push(format!("# Del {}\n\n{}", i + 1, self.chat(&prompt, &user, false)?));
+        }
         let user = format!(
-            "Dette er del {} av {n} av et langt møte. Lag referat bare for denne delen.\n\nTranskripsjon:\n\n{part}",
-            i + 1
+            "Her er referater av hver del av et langt møte, i rekkefølge. Slå dem sammen til ett referat for hele møtet.\n\n{}",
+            summaries.join("\n\n")
         );
-        summaries.push(format!("# Del {}\n\n{}", i + 1, writer.chat(num_ctx, &prompt, &user)?));
+        self.chat(&prompt, &user, false)
     }
-    let user = format!(
-        "Her er referater av hver del av et langt møte, i rekkefølge. Slå dem sammen til ett referat for hele møtet.\n\n{}",
-        summaries.join("\n\n")
-    );
-    writer.chat(num_ctx, &prompt, &user)
 }
 
 /// The summary model's name for the note's frontmatter.
@@ -94,12 +110,13 @@ pub fn short_name(model: &str) -> &str {
     name.strip_suffix("-gguf").unwrap_or(name)
 }
 
-/// Splits segments into transcript texts that each fit in `budget_chars`.
-fn split(segments: &[Segment], budget_chars: usize) -> Vec<String> {
+/// Splits the transcript into texts that each fit in `budget_chars`.
+pub fn split(transcript: &Transcript, budget_chars: usize) -> Vec<String> {
+    let render = |segments: Vec<Segment>| Transcript { segments, names: transcript.names.clone() }.text();
     let mut parts = Vec::new();
     let mut current: Vec<Segment> = Vec::new();
     let mut len = 0;
-    for s in segments {
+    for s in &transcript.segments {
         let cost = s.text.len() + 16; // + speaker label and newlines
         if len + cost > budget_chars && !current.is_empty() {
             parts.push(render(std::mem::take(&mut current)));
@@ -110,11 +127,6 @@ fn split(segments: &[Segment], budget_chars: usize) -> Vec<String> {
     }
     parts.push(render(current));
     parts
-}
-
-fn render(segments: Vec<Segment>) -> String {
-    let paragraphs = Transcript { segments }.paragraphs();
-    paragraphs.iter().map(|p| format!("{}: {}", p.who.label(), p.text)).collect::<Vec<_>>().join("\n\n")
 }
 
 #[cfg(test)]
@@ -133,9 +145,10 @@ mod tests {
         let segments: Vec<Segment> = (0..10)
             .map(|i| Segment { start_ms: i * 1000, end_ms: i * 1000 + 900, who: Who::Others, text: "x".repeat(84) })
             .collect();
-        let parts = split(&segments, 300);
+        let transcript = Transcript { segments, ..Default::default() };
+        let parts = split(&transcript, 300);
         assert_eq!(parts.len(), 4);
         assert!(parts.iter().all(|p| p.starts_with("Andre: ")));
-        assert_eq!(split(&segments, 10_000).len(), 1);
+        assert_eq!(split(&transcript, 10_000).len(), 1);
     }
 }

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::meeting::Meeting;
-use crate::transcript::Transcript;
+use crate::transcript::{Transcript, Who};
 
 /// A finished summary and the short name of the model that wrote it.
 pub struct Summary {
@@ -18,7 +18,7 @@ pub struct Summary {
 
 pub fn render(meeting: &Meeting, transcript: &Transcript, transcription_model: &str, summary: Option<&Summary>) -> String {
     let duration_min = ((meeting.end - meeting.start).num_seconds() as f64 / 60.0).round() as i64;
-    let people: Vec<String> = transcript.people().into_iter().map(|w| w.label()).collect();
+    let people: Vec<String> = transcript.people().into_iter().map(|w| transcript.label(w)).collect();
 
     let mut out = String::new();
     // Titles go through JSON quoting, which is valid YAML and survives colons and quotes.
@@ -29,6 +29,16 @@ pub fn render(meeting: &Meeting, transcript: &Transcript, transcription_model: &
     let _ = writeln!(out, "end: \"{}\"", meeting.end.format("%H:%M"));
     let _ = writeln!(out, "duration_min: {duration_min}");
     let _ = writeln!(out, "speakers: [{}]", people.join(", "));
+    if !transcript.names.is_empty() {
+        // So a wrong name is easy to fix, by hand or by asking an LLM.
+        let _ = writeln!(out, "# Speaker names were found in the transcript. To fix one, replace it everywhere in this note.");
+        let _ = writeln!(out, "speaker_names:");
+        for (n, naming) in &transcript.names {
+            let _ = writeln!(out, "  - name: {}", serde_json::to_string(&naming.name).unwrap());
+            let _ = writeln!(out, "    label: \"{}\"", Who::Speaker(*n).label());
+            let _ = writeln!(out, "    evidence: {}", serde_json::to_string(&naming.evidence).unwrap());
+        }
+    }
     let _ = writeln!(out, "type: meeting");
     let _ = writeln!(out, "transcription_model: {transcription_model}");
     if let Some(summary) = summary {
@@ -43,7 +53,7 @@ pub fn render(meeting: &Meeting, transcript: &Transcript, transcription_model: &
 
     let _ = writeln!(out, "## Transkripsjon\n");
     for p in transcript.paragraphs() {
-        let _ = writeln!(out, "**{}** [{}]\n{}\n", p.who.label(), timestamp(p.start_ms), p.text);
+        let _ = writeln!(out, "**{}** [{}]\n{}\n", transcript.label(p.who), timestamp(p.start_ms), p.text);
     }
     out
 }
