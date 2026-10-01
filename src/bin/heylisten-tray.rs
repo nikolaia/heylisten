@@ -74,6 +74,9 @@ struct Tray {
     /// The orange dot's pulse, and which frame is showing.
     pulse: Vec<Icon>,
     frame: usize,
+    started: Instant,
+    /// The text next to the icon (elapsed time while recording).
+    title: Option<String>,
     /// Whether the setup items are in the menu right now.
     shown_download: bool,
     shown_install: bool,
@@ -139,6 +142,9 @@ fn main() -> Result<()> {
     let mut tray: Option<Tray> = None;
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_secs(1));
+        // Redraw on the timer and on our own events only. Redrawing on every event would loop:
+        // changing menu text makes AppKit redraw, which is an event too.
+        let wake = matches!(event, Event::NewEvents(_) | Event::UserEvent(_));
         match event {
             // The tray icon must be created once the event loop runs (macOS).
             Event::NewEvents(StartCause::Init) => {
@@ -162,6 +168,8 @@ fn main() -> Result<()> {
                     shown_icon: Look::Idle,
                     pulse: pulse_frames(),
                     frame: 0,
+                    started: Instant::now(),
+                    title: None,
                     shown_download: false,
                     shown_install: false,
                 });
@@ -245,7 +253,9 @@ fn main() -> Result<()> {
             }
             _ => {}
         }
-        if let Some(t) = tray.as_mut() {
+        if let Some(t) = tray.as_mut()
+            && wake
+        {
             t.refresh(&config);
             if t.shown_icon == Look::Busy {
                 // Wake often enough to animate the pulse.
@@ -291,16 +301,19 @@ impl Tray {
             }
             State::Busy(step) => (step.clone(), None),
         };
-        self.items.status.set_text(text);
-        self.icon.set_title(title);
-        self.items.start.set_enabled(idle && !needs_speech);
-        self.items.stop.set_enabled(matches!(self.state, State::Recording(_)));
+        set_text(&self.items.status, &text);
+        if title != self.title {
+            self.icon.set_title(title.as_deref());
+            self.title = title;
+        }
+        set_enabled(&self.items.start, idle && !needs_speech);
+        set_enabled(&self.items.stop, matches!(self.state, State::Recording(_)));
 
         // Setup items appear only while something is missing.
         if let Some(n) = &self.needs {
             let download = idle && n.downloadable();
             if download {
-                self.items.download.set_text(format!("Download models (~{:.1} GB)…", n.download_bytes() as f64 / 1e9));
+                set_text(&self.items.download, &format!("Download models (~{:.1} GB)…", n.download_bytes() as f64 / 1e9));
             }
             self.shown_download = show(&self.menu, &self.items.download, 1, download, self.shown_download);
             let install = n.ollama_missing;
@@ -309,7 +322,7 @@ impl Tray {
         }
         self.set_summary_choices(config);
         let dir = config.notes_dir.file_name().map_or_else(|| config.notes_dir.display().to_string(), |n| n.to_string_lossy().into());
-        self.items.notes_dir.set_text(format!("Set notes location… ({dir})"));
+        set_text(&self.items.notes_dir, &format!("Set notes location… ({dir})"));
 
         let look = match self.state {
             State::Recording(_) => Look::Recording,
@@ -317,8 +330,12 @@ impl Tray {
             State::Idle => Look::Idle,
         };
         if look == Look::Busy {
-            self.frame = (self.frame + 1) % self.pulse.len();
-            let _ = self.icon.set_icon(Some(self.pulse[self.frame].clone()));
+            // The frame follows the clock, however often the event loop happens to run.
+            let frame = (self.started.elapsed().as_millis() / PULSE_FRAME.as_millis()) as usize % self.pulse.len();
+            if frame != self.frame || self.shown_icon != Look::Busy {
+                let _ = self.icon.set_icon(Some(self.pulse[frame].clone()));
+                self.frame = frame;
+            }
         } else if look != self.shown_icon {
             let _ = match look {
                 Look::Recording => self.icon.set_icon(Some(dot_icon([230, 50, 50]))),
@@ -370,6 +387,19 @@ impl Tray {
         }
         self.items.recent.set_enabled(!recent.is_empty());
         self.recent = recent;
+    }
+}
+
+/// Changing a menu item makes AppKit redraw it, so only change what actually changed.
+fn set_text(item: &MenuItem, text: &str) {
+    if item.text() != text {
+        item.set_text(text);
+    }
+}
+
+fn set_enabled(item: &MenuItem, enabled: bool) {
+    if item.is_enabled() != enabled {
+        item.set_enabled(enabled);
     }
 }
 
@@ -481,11 +511,13 @@ fn dot_icon(rgb: [u8; 3]) -> Icon {
     draw(|d| (d < 0.62).then_some((rgb, 255)))
 }
 
-const PULSE_FRAME: Duration = Duration::from_millis(110);
+/// One breath of the orange "working" dot takes PULSE_FRAMES × PULSE_FRAME = 1.8 s.
+const PULSE_FRAME: Duration = Duration::from_millis(100);
+const PULSE_FRAMES: usize = 18;
 
 /// The orange "working" dot, breathing: it grows a little and fades, then comes back.
 fn pulse_frames() -> Vec<Icon> {
-    const FRAMES: usize = 12;
+    const FRAMES: usize = PULSE_FRAMES;
     (0..FRAMES)
         .map(|i| {
             // 1 at the start of the cycle, 0 halfway.

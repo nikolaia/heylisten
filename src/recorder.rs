@@ -91,6 +91,8 @@ fn track_writer(
         };
         let t0 = Instant::now();
         let (mut got, mut last_log) = (0usize, Instant::now());
+        // 16 kHz samples written so far, silence included.
+        let mut written: u64 = 0;
         for (samples, rate) in rx {
             got += samples.len();
             if debug && last_log.elapsed() > Duration::from_secs(1) {
@@ -107,23 +109,33 @@ fn track_writer(
                 rs.finish(&mut out)?;
                 wav.write(&out)?;
                 feed(&out, &mut chunker, false);
+                written += out.len() as u64;
                 resampler = Some((To16k::new(rate)?, rate));
             }
             let rs = match &mut resampler {
                 Some((rs, _)) => rs,
-                None => {
-                    // Line the tracks up: pad with silence for the time before this one started.
-                    let late = (Local::now() - start).num_milliseconds().max(0) as usize;
-                    let padding = vec![0.0; late * audio::SAMPLE_RATE as usize / 1000];
-                    wav.write(&padding)?;
-                    feed(&padding, &mut chunker, false);
-                    &mut resampler.insert((To16k::new(rate)?, rate)).0
-                }
+                None => &mut resampler.insert((To16k::new(rate)?, rate)).0,
             };
             out.clear();
             rs.push(&samples, &mut out)?;
+
+            // Keep the track in step with the clock. A source can start late, and macOS's
+            // system-audio tap delivers nothing while nothing is playing: fill those gaps with
+            // silence, so both tracks (and the timestamps) stay lined up with real time.
+            let due = (Local::now() - start).num_milliseconds().max(0) as u64 * audio::SAMPLE_RATE as u64 / 1000;
+            let gap = due.saturating_sub(written + out.len() as u64);
+            if gap > audio::SAMPLE_RATE as u64 * 3 / 10 {
+                if debug {
+                    log(&format!("{:?}: {:.1} s without audio, filled with silence", track, gap as f32 / audio::SAMPLE_RATE as f32));
+                }
+                let silence = vec![0.0; gap as usize];
+                wav.write(&silence)?;
+                feed(&silence, &mut chunker, false);
+                written += gap;
+            }
             wav.write(&out)?;
             feed(&out, &mut chunker, false);
+            written += out.len() as u64;
             if last_flush.elapsed() > Duration::from_secs(1) {
                 wav.flush()?;
                 last_flush = Instant::now();
