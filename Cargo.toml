@@ -1,0 +1,32 @@
+[package]
+name = "heylisten"
+version = "0.1.0"
+edition = "2024"
+description = "Local-only meeting transcription and summaries, mostly in Norwegian"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0.104"
+chrono = { version = "0.4.45", features = ["serde"] }
+clap = { version = "4.6.7", features = ["derive"] }
+cpal = "0.18.2"
+dirs = "7.0.0"
+hound = "3.5.1"
+libc = "0.2.189"
+rubato = "5.0.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sherpa-rs = { version = "0.6.8", default-features = false, features = ["static", "download-binaries"] }
+symphonia = { version = "0.6.1", features = ["aac", "isomp4", "mp3"] }
+toml = "1.1.6"
+# No TLS on purpose: heyListen only talks to Ollama (see docs/adr/0002).
+ureq = { version = "3.4.2", default-features = false, features = ["json"] }
+whisper-rs = "0.16.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-core-audio = "0.3.2"
+objc2-core-audio-types = "0.3.2"
+objc2-core-foundation = "0.3.2"
+objc2-foundation = "0.3.2"
+whisper-rs = { version = "0.16.0", features = ["metal"] }

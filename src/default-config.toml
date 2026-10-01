@@ -1,0 +1,16 @@
+# heyListen config. Run `heylisten doctor` after editing.
+
+# Folder in your Obsidian vault where meeting notes are written.
+vault = "~/Obsidian/Vault/Møter"
+
+# NB-Whisper GGML model used for transcription.
+whisper_model = "~/models/nb-whisper-large-q5_0.bin"
+
+# Ollama model used for the summary.
+ollama_model = "hf.co/NbAiLab/borealis-12b-gguf"
+
+# Keep this on localhost. Anything else sends transcripts off this machine.
+ollama_url = "http://localhost:11434"
+
+# Keep the recorded audio after the note is written.
+keep_audio = false

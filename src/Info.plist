@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>dev.heylisten.recorder</string>
+	<key>CFBundleName</key>
+	<string>heyListen</string>
+	<key>CFBundleExecutable</key>
+	<string>heylisten</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.4</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>heyListen records your side of the meeting. The audio never leaves this Mac.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>heyListen records the other people in your meeting. The audio never leaves this Mac.</string>
+</dict>
+</plist>
