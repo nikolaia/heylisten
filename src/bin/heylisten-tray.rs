@@ -53,6 +53,7 @@ struct Items {
     recent: Submenu,
     summary: Submenu,
     notes_dir: MenuItem,
+    debug: CheckMenuItem,
     quit: MenuItem,
 }
 
@@ -70,6 +71,9 @@ struct Tray {
     /// What the Summary model submenu was last built from.
     summary_shown: Option<(SummaryEngine, String, Vec<String>)>,
     shown_icon: Look,
+    /// The orange dot's pulse, and which frame is showing.
+    pulse: Vec<Icon>,
+    frame: usize,
     /// Whether the setup items are in the menu right now.
     shown_download: bool,
     shown_install: bool,
@@ -113,6 +117,7 @@ fn main() -> Result<()> {
         recent: Submenu::new("Recent notes", false),
         summary: Submenu::new("Summary model", true),
         notes_dir: MenuItem::new("Set notes location…", true, None),
+        debug: CheckMenuItem::new("Debug mode (keep recordings)", true, config.debug, None),
         quit: MenuItem::new("Quit heyListen", true, None),
     };
     let menu = Menu::new();
@@ -126,6 +131,7 @@ fn main() -> Result<()> {
         &items.summary,
         &items.notes_dir,
         &PredefinedMenuItem::separator(),
+        &items.debug,
         &items.quit,
     ])?;
 
@@ -154,6 +160,8 @@ fn main() -> Result<()> {
                     summary_ids: HashMap::new(),
                     summary_shown: None,
                     shown_icon: Look::Idle,
+                    pulse: pulse_frames(),
+                    frame: 0,
                     shown_download: false,
                     shown_install: false,
                 });
@@ -183,6 +191,11 @@ fn main() -> Result<()> {
                         && let Err(e) = config.set_notes_dir(&dir)
                     {
                         t.error = Some(format!("Couldn't save the notes location: {e:#}"));
+                    }
+                } else if id == t.items.debug.id() {
+                    // The checkbox has already toggled itself.
+                    if let Err(e) = config.set_debug(t.items.debug.is_checked()) {
+                        t.error = Some(format!("Couldn't save debug mode: {e:#}"));
                     }
                 } else if id == t.items.quit.id() {
                     *control_flow = ControlFlow::Exit;
@@ -234,6 +247,10 @@ fn main() -> Result<()> {
         }
         if let Some(t) = tray.as_mut() {
             t.refresh(&config);
+            if t.shown_icon == Look::Busy {
+                // Wake often enough to animate the pulse.
+                *control_flow = ControlFlow::WaitUntil(Instant::now() + PULSE_FRAME);
+            }
         }
     })
 }
@@ -272,7 +289,7 @@ impl Tray {
                 let elapsed = format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60);
                 (format!("Recording '{}' · {elapsed}", m.title), Some(elapsed))
             }
-            State::Busy(step) => (step.clone(), Some("…".into())),
+            State::Busy(step) => (step.clone(), None),
         };
         self.items.status.set_text(text);
         self.icon.set_title(title);
@@ -299,14 +316,17 @@ impl Tray {
             State::Starting | State::Busy(_) => Look::Busy,
             State::Idle => Look::Idle,
         };
-        if look != self.shown_icon {
+        if look == Look::Busy {
+            self.frame = (self.frame + 1) % self.pulse.len();
+            let _ = self.icon.set_icon(Some(self.pulse[self.frame].clone()));
+        } else if look != self.shown_icon {
             let _ = match look {
                 Look::Recording => self.icon.set_icon(Some(dot_icon([230, 50, 50]))),
-                Look::Busy => self.icon.set_icon(Some(dot_icon([240, 160, 30]))),
                 Look::Idle => self.icon.set_icon_templated(Some(idle_icon())),
+                Look::Busy => unreachable!(),
             };
-            self.shown_icon = look;
         }
+        self.shown_icon = look;
     }
 
     /// Rebuilds the Summary model submenu: the built-in Borealis, plus whatever Ollama has.
@@ -453,23 +473,40 @@ const SIZE: u32 = 44; // 22 pt menu bar icons, drawn at 2x
 
 /// A ring: black on transparent, used as a template so macOS tints it for light and dark menu bars.
 fn idle_icon() -> Icon {
-    draw(|d| (d > 0.55 && d < 0.78).then_some([0, 0, 0]))
+    draw(|d| (d > 0.55 && d < 0.78).then_some(([0, 0, 0], 255)))
 }
 
 /// A filled dot in a colour.
 fn dot_icon(rgb: [u8; 3]) -> Icon {
-    draw(|d| (d < 0.62).then_some(rgb))
+    draw(|d| (d < 0.62).then_some((rgb, 255)))
 }
 
-/// Draws a square icon from a function of the distance from the centre (0 at the centre, 1 at the edge).
-fn draw(paint: impl Fn(f32) -> Option<[u8; 3]>) -> Icon {
+const PULSE_FRAME: Duration = Duration::from_millis(110);
+
+/// The orange "working" dot, breathing: it grows a little and fades, then comes back.
+fn pulse_frames() -> Vec<Icon> {
+    const FRAMES: usize = 12;
+    (0..FRAMES)
+        .map(|i| {
+            // 1 at the start of the cycle, 0 halfway.
+            let t = 0.5 + 0.5 * (i as f32 / FRAMES as f32 * std::f32::consts::TAU).cos();
+            let radius = 0.50 + 0.14 * t;
+            let alpha = (110.0 + 145.0 * t) as u8;
+            draw(move |d| (d < radius).then_some(([240, 160, 30], alpha)))
+        })
+        .collect()
+}
+
+/// Draws a square icon from a function of the distance from the centre (0 at the centre, 1 at
+/// the edge) to a colour and opacity.
+fn draw(paint: impl Fn(f32) -> Option<([u8; 3], u8)>) -> Icon {
     let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
     let c = SIZE as f32 / 2.0;
     for y in 0..SIZE {
         for x in 0..SIZE {
             let d = ((x as f32 + 0.5 - c).powi(2) + (y as f32 + 0.5 - c).powi(2)).sqrt() / c;
             match paint(d) {
-                Some([r, g, b]) => rgba.extend([r, g, b, 255]),
+                Some(([r, g, b], a)) => rgba.extend([r, g, b, a]),
                 None => rgba.extend([0, 0, 0, 0]),
             }
         }

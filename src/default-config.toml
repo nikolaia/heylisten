@@ -18,3 +18,6 @@ ollama_url = "http://localhost:11434"
 
 # Keep the recorded audio after the note is written.
 keep_audio = false
+
+# For testing: keep every recording and log details to recorder.log in the meeting folder.
+debug = false

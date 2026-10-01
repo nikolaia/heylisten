@@ -93,7 +93,7 @@ pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, on_event: O
     for track in [Track::System, Track::Mic] {
         let Some((_, samples)) = tracks.iter().find(|(t, _)| *t == track) else { continue };
         on_event(Event::Diarizing(track));
-        match diarize::diarize(samples) {
+        match diarize::diarize(samples, config.debug) {
             Ok(turns) if track == Track::System => others = diarize::label_others(&mut transcript.segments, &turns),
             Ok(turns) => diarize::label_mic(&mut transcript.segments, &turns, others + 1),
             Err(e) => on_event(Event::DiarizationFailed(track, format!("{e:#}"))),
@@ -119,7 +119,7 @@ pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, on_event: O
     done.save()?;
     on_event(Event::NoteWritten(note_path.clone()));
 
-    if !config.keep_audio && summary.is_some() {
+    if !config.keep_audio && !config.debug && summary.is_some() {
         for track in Track::ALL {
             let _ = fs::remove_file(meeting.track_path(track));
         }

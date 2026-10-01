@@ -21,7 +21,7 @@ pub struct Turn {
 }
 
 /// Finds who speaks when in 16 kHz mono audio. The number of speakers is detected.
-pub fn diarize(samples: &[f32]) -> Result<Vec<Turn>> {
+pub fn diarize(samples: &[f32], debug: bool) -> Result<Vec<Turn>> {
     let config = DiarizeConfig {
         num_clusters: Some(-1), // detect the number of speakers
         threshold: Some(0.5),
@@ -33,7 +33,7 @@ pub fn diarize(samples: &[f32]) -> Result<Vec<Turn>> {
     // sherpa-rs reports errors as eyre::Report.
     let mut d = Diarize::new(segmentation, embedding, config).map_err(|e| anyhow!("{e}"))?;
     let turns = d.compute(samples.to_vec(), None).map_err(|e| anyhow!("{e}"))?;
-    if std::env::var_os("HEYLISTEN_DEBUG").is_some() {
+    if debug {
         for t in &turns {
             eprintln!("turn {:6.2}–{:6.2} speaker {}", t.start, t.end, t.speaker);
         }

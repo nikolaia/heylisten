@@ -20,6 +20,9 @@ pub struct Config {
     pub ollama_model: String,
     pub ollama_url: String,
     pub keep_audio: bool,
+    /// For testing: keeps every recording and logs details to each meeting's recorder.log.
+    /// HEYLISTEN_DEBUG=1 turns it on too.
+    pub debug: bool,
 }
 
 impl Default for Config {
@@ -31,6 +34,7 @@ impl Default for Config {
             ollama_model: "hf.co/NbAiLab/borealis-12b-gguf".into(),
             ollama_url: "http://localhost:11434".into(),
             keep_audio: false,
+            debug: false,
         }
     }
 }
@@ -61,6 +65,7 @@ impl Config {
             toml::from_str(&text).with_context(|| format!("invalid config in {}", path.display()))?;
         config.notes_dir = expand_home(&config.notes_dir);
         config.whisper_model = expand_home(&config.whisper_model);
+        config.debug |= std::env::var_os("HEYLISTEN_DEBUG").is_some();
         Ok(config)
     }
 
@@ -71,6 +76,13 @@ impl Config {
             doc["notes_dir"] = toml_edit::value(dir.to_string_lossy().as_ref());
         })?;
         self.notes_dir = dir.to_path_buf();
+        Ok(())
+    }
+
+    /// Saves debug mode to the config file.
+    pub fn set_debug(&mut self, on: bool) -> Result<()> {
+        edit(|doc| doc["debug"] = toml_edit::value(on))?;
+        self.debug = on;
         Ok(())
     }
 

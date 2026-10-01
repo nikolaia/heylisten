@@ -51,7 +51,9 @@ impl System {
             let output: AudioObjectID = get(kAudioObjectSystemObject as _, kAudioHardwarePropertyDefaultOutputDevice, None)?;
             let output_uid: *const CFString = get(output, kAudioDevicePropertyDeviceUID, None)?;
             let output_uid = CFRetained::from_raw(NonNull::new(output_uid as *mut CFString).expect("no output device UID")).to_string();
-            sys.device = output_uid.clone();
+            let name: *const CFString = get(output, kAudioObjectPropertyName, None)?;
+            sys.device = NonNull::new(name as *mut CFString)
+                .map_or_else(|| output_uid.clone(), |n| CFRetained::from_raw(n).to_string());
 
             let output_uid = NSString::from_str(&output_uid);
             let sub_device = dict(&[(kAudioSubDeviceUIDKey, &*output_uid)]);

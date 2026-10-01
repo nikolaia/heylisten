@@ -45,7 +45,7 @@ impl Transcriber {
         let len_ms = samples.len() as u64 * 1000 / crate::audio::SAMPLE_RATE as u64;
         let mut segments = Vec::new();
         for s in state.as_iter() {
-            let text = s.to_str_lossy()?.trim().to_string();
+            let text = strip_special_tokens(&s.to_str_lossy()?);
             if text.is_empty() || s.no_speech_probability() > 0.6 || is_hallucination(&text) {
                 continue;
             }
@@ -61,8 +61,37 @@ impl Transcriber {
     }
 }
 
+/// Removes whisper's own markers, like NB-Whisper's `<|nocaptions|>` for "no speech here".
+fn strip_special_tokens(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("<|") {
+        out.push_str(&rest[..start]);
+        match rest[start..].find("|>") {
+            Some(end) => rest = &rest[start + end + 2..],
+            None => {
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Subtitle credits whisper learned from TV subtitles and produces on silence or music.
 fn is_hallucination(text: &str) -> bool {
     let t = text.to_lowercase();
     ["teksting av", "tekstet av", "undertekster av", "takk for at du så"].iter().any(|p| t.contains(p))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_special_tokens() {
+        assert_eq!(strip_special_tokens(" <|nocaptions|>"), "");
+        assert_eq!(strip_special_tokens("Hei <|no|> på deg"), "Hei på deg");
+        assert_eq!(strip_special_tokens("Helt vanlig tekst."), "Helt vanlig tekst.");
+    }
 }

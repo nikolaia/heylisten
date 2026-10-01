@@ -28,12 +28,16 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    pub fn start(meeting: &Meeting, whisper_model: &Path) -> Result<Recorder> {
+    /// `debug` logs how much audio each track receives, every second.
+    pub fn start(meeting: &Meeting, whisper_model: &Path, debug: bool) -> Result<Recorder> {
         let (live_tx, live) = live::spawn(whisper_model.to_path_buf(), meeting.dir())?;
-        let (mic_tx, mic_writer) = track_writer(meeting, Track::Mic, live_tx.clone())?;
-        let (sys_tx, sys_writer) = track_writer(meeting, Track::System, live_tx)?;
+        let (mic_tx, mic_writer) = track_writer(meeting, Track::Mic, live_tx.clone(), debug)?;
+        let (sys_tx, sys_writer) = track_writer(meeting, Track::System, live_tx, debug)?;
         let mic = Mic::start(Box::new(move |s, rate| drop(mic_tx.send((s.to_vec(), rate)))))?;
         let system = System::start(Box::new(move |s, rate| drop(sys_tx.send((s.to_vec(), rate)))))?;
+        // Always logged, so a bad recording can be traced to the device it came from.
+        log(&format!("mic: {} ({} Hz, {} ch)", mic.device, mic.rate, mic.channels));
+        log(&format!("system audio: tap of everything except heyListen, output device {}", system.device));
         Ok(Recorder { mic: Some(mic), system: Some(system), writers: vec![mic_writer, sys_writer], live })
     }
 
@@ -50,7 +54,7 @@ impl Recorder {
         match self.live.join().expect("live transcriber panicked") {
             Ok(()) => Ok(true),
             Err(e) => {
-                eprintln!("live transcript incomplete: {e:#}");
+                log(&format!("live transcript incomplete: {e:#}"));
                 Ok(false)
             }
         }
@@ -60,12 +64,17 @@ impl Recorder {
 type Audio = (Vec<f32>, u32);
 
 /// A thread that resamples one track to 16 kHz and streams it into its WAV file.
-fn track_writer(meeting: &Meeting, track: Track, live: mpsc::Sender<live::Chunk>) -> Result<(mpsc::Sender<Audio>, JoinHandle<Result<()>>)> {
+fn track_writer(
+    meeting: &Meeting,
+    track: Track,
+    live: mpsc::Sender<live::Chunk>,
+    debug: bool,
+) -> Result<(mpsc::Sender<Audio>, JoinHandle<Result<()>>)> {
     let (tx, rx) = mpsc::channel::<Audio>();
     let mut wav = WavWriter::create(&meeting.track_path(track))?;
     let start = meeting.start;
     let handle = thread::spawn(move || {
-        let mut resampler: Option<To16k> = None;
+        let mut resampler: Option<(To16k, u32)> = None;
         let mut chunker = Chunker::new(track);
         let mut chunks = Vec::new();
         let mut out = Vec::new();
@@ -84,19 +93,31 @@ fn track_writer(meeting: &Meeting, track: Track, live: mpsc::Sender<live::Chunk>
         let (mut got, mut last_log) = (0usize, Instant::now());
         for (samples, rate) in rx {
             got += samples.len();
-            if std::env::var_os("HEYLISTEN_DEBUG").is_some() && last_log.elapsed() > Duration::from_secs(1) {
-                eprintln!("[{:?}] {:5.1}s received {:6.2}s of audio at {rate} Hz", track, t0.elapsed().as_secs_f32(), got as f32 / rate as f32);
+            if debug && last_log.elapsed() > Duration::from_secs(1) {
+                log(&format!("{:?}: {:5.1}s in, received {:6.2}s of audio at {rate} Hz", track, t0.elapsed().as_secs_f32(), got as f32 / rate as f32));
                 last_log = Instant::now();
             }
+            // A device can change sample rate mid-meeting (Bluetooth headsets switching mode,
+            // for example): finish the old resampler and start a new one at the new rate.
+            if let Some((rs, old)) = &mut resampler
+                && *old != rate
+            {
+                log(&format!("{:?}: sample rate changed from {old} Hz to {rate} Hz", track));
+                out.clear();
+                rs.finish(&mut out)?;
+                wav.write(&out)?;
+                feed(&out, &mut chunker, false);
+                resampler = Some((To16k::new(rate)?, rate));
+            }
             let rs = match &mut resampler {
-                Some(rs) => rs,
+                Some((rs, _)) => rs,
                 None => {
                     // Line the tracks up: pad with silence for the time before this one started.
                     let late = (Local::now() - start).num_milliseconds().max(0) as usize;
                     let padding = vec![0.0; late * audio::SAMPLE_RATE as usize / 1000];
                     wav.write(&padding)?;
                     feed(&padding, &mut chunker, false);
-                    resampler.insert(To16k::new(rate)?)
+                    &mut resampler.insert((To16k::new(rate)?, rate)).0
                 }
             };
             out.clear();
@@ -108,7 +129,7 @@ fn track_writer(meeting: &Meeting, track: Track, live: mpsc::Sender<live::Chunk>
                 last_flush = Instant::now();
             }
         }
-        if let Some(rs) = &mut resampler {
+        if let Some((rs, _)) = &mut resampler {
             out.clear();
             rs.finish(&mut out)?;
             wav.write(&out)?;
@@ -118,6 +139,11 @@ fn track_writer(meeting: &Meeting, track: Track, live: mpsc::Sender<live::Chunk>
         Ok(())
     });
     Ok((tx, handle))
+}
+
+/// One timestamped line in the meeting's recorder.log (the recorder's stderr).
+pub fn log(line: &str) {
+    eprintln!("[{}] {line}", Local::now().format("%H:%M:%S"));
 }
 
 // ---- The background process ----
@@ -290,7 +316,7 @@ pub fn run(config: &Config, meeting_id: &str) -> Result<()> {
     }
     let state = State { pid: std::process::id() as i32, meeting: meeting.id.clone() };
     fs::write(state_path(), serde_json::to_string(&state)?)?;
-    let recorder = Recorder::start(&meeting, &config.whisper_model).context("can't start recording")?;
+    let recorder = Recorder::start(&meeting, &config.whisper_model, config.debug).context("can't start recording")?;
     RECORDING.store(true, Ordering::SeqCst);
     while !STOP.load(Ordering::SeqCst) {
         thread::sleep(Duration::from_millis(100));

@@ -7,6 +7,8 @@ use super::{Sink, downmix};
 pub struct Mic {
     _stream: cpal::Stream,
     pub device: String,
+    pub rate: u32,
+    pub channels: usize,
 }
 
 impl Mic {
@@ -26,10 +28,10 @@ impl Mic {
                 downmix(data, channels, &mut mono);
                 sink(&mono, rate);
             },
-            |err| eprintln!("microphone error: {err}"),
+            |err| crate::recorder::log(&format!("microphone error: {err}")),
             None,
         )?;
         stream.play().context("can't start the microphone (check microphone permission)")?;
-        Ok(Mic { _stream: stream, device: name })
+        Ok(Mic { _stream: stream, device: name, rate, channels })
     }
 }
