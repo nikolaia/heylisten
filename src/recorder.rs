@@ -201,6 +201,9 @@ fn launch(exe: &Path, meeting_id: &str, log: &Path) -> Result<()> {
         fs::write(app.join("Contents/Info.plist"), include_str!("Info.plist"))?;
         fs::copy(exe, &bin)?;
         fs::set_permissions(&bin, fs::Permissions::from_mode(0o755))?;
+        // A copy of a downloaded heyListen inherits its quarantine flag, and Gatekeeper would then
+        // block this launcher too. The user already approved heyListen itself.
+        let _ = Command::new("xattr").args(["-dr", "com.apple.quarantine"]).arg(&app).status();
         let signed = Command::new("codesign").args(["--force", "--sign", "-"]).arg(&app).stderr(Stdio::null()).status()?;
         if !signed.success() {
             bail!("couldn't sign {}", app.display());

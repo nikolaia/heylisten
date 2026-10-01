@@ -11,7 +11,7 @@ Skriv referatet på norsk, med nøyaktig disse overskriftene i denne rekkefølge
 Punktliste over beslutninger som ble tatt. Skriv «Ingen» hvis det ikke ble tatt noen.
 
 ## Oppgaver
-Oppgaver som Obsidian-sjekkbokser, slik: `- [ ] Oppgave (ansvarlig: Navn)`. Utelat «(ansvarlig: …)» hvis det ikke er klart hvem som er ansvarlig. Skriv «Ingen» hvis det ikke er noen oppgaver.
+Oppgaver som Markdown-sjekkbokser, slik: `- [ ] Oppgave (ansvarlig: Navn)`. Utelat «(ansvarlig: …)» hvis det ikke er klart hvem som er ansvarlig. Skriv «Ingen» hvis det ikke er noen oppgaver.
 
 ## Tema
 Kort punktliste over temaene som ble diskutert.

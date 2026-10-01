@@ -36,18 +36,19 @@ pub fn run(config: &Config) -> Vec<Check> {
         fail(
             format!("Whisper model missing: {}", model.display()),
             format!(
-                "mkdir -p {dir} && curl -L -o {path} https://huggingface.co/NbAiLab/nb-whisper-large/resolve/main/ggml-model-q5_0.bin",
+                "heylisten setup   (or by hand: mkdir -p {dir} && curl -L -o {path} {url})",
                 dir = shell_quote(model.parent().unwrap_or(Path::new("."))),
                 path = shell_quote(model),
+                url = crate::setup::WHISPER_URL,
             ),
         )
     });
 
-    checks.push(match writable(&config.vault) {
-        true => pass(format!("Vault folder {}", config.vault.display())),
+    checks.push(match writable(&config.notes_dir) {
+        true => pass(format!("Notes folder {}", config.notes_dir.display())),
         false => fail(
-            format!("Vault folder missing or not writable: {}", config.vault.display()),
-            format!("mkdir -p {}  (or set `vault` in the config)", shell_quote(&config.vault)),
+            format!("Notes folder missing or not writable: {}", config.notes_dir.display()),
+            format!("mkdir -p {}  (or set `notes_dir` in the config)", shell_quote(&config.notes_dir)),
         ),
     });
 
@@ -68,14 +69,14 @@ pub fn run(config: &Config) -> Vec<Check> {
     match ollama::list_models(&config.ollama_url) {
         Err(_) => checks.push(fail(
             format!("Ollama not reachable at {}", config.ollama_url),
-            "Start it: `ollama serve` (or open the Ollama app)",
+            format!("Install Ollama from {} and open it (or start it: `ollama serve`)", crate::setup::OLLAMA_DOWNLOAD),
         )),
         Ok(models) => {
             checks.push(pass(format!("Ollama running at {}", config.ollama_url)));
             checks.push(if ollama::has_model(&models, &config.ollama_model) {
                 pass(format!("Ollama model {}", config.ollama_model))
             } else {
-                fail(format!("Ollama model not pulled: {}", config.ollama_model), format!("ollama pull {}", config.ollama_model))
+                fail(format!("Ollama model not pulled: {}", config.ollama_model), format!("heylisten setup   (or: ollama pull {})", config.ollama_model))
             });
         }
     }

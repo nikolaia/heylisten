@@ -13,14 +13,19 @@ cpal = "0.18.2"
 dirs = "7.0.0"
 hound = "3.5.1"
 libc = "0.2.189"
+rfd = { version = "0.17.2", optional = true }
 rubato = "5.0.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+sha2 = "0.11.0"
 sherpa-rs = { version = "0.6.8", default-features = false, features = ["static", "download-binaries"] }
 symphonia = { version = "0.6.1", features = ["aac", "isomp4", "mp3"] }
+tao = { version = "0.37.1", optional = true }
 toml = "1.1.6"
-# No TLS on purpose: heyListen only talks to Ollama (see docs/adr/0002).
-ureq = { version = "3.4.2", default-features = false, features = ["json"] }
+toml_edit = "0.25.15"
+tray-icon = { version = "0.26.0", optional = true }
+# Talks to Ollama and, during `setup` only, downloads the speech model (see docs/adr/0004).
+ureq = { version = "3.4.2", features = ["json"] }
 whisper-rs = "0.16.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -30,3 +35,11 @@ objc2-core-audio-types = "0.3.2"
 objc2-core-foundation = "0.3.2"
 objc2-foundation = "0.3.2"
 whisper-rs = { version = "0.16.0", features = ["metal"] }
+
+[features]
+# The menu bar / tray app. Off by default so the CLI builds without GTK on Linux.
+tray = ["dep:tao", "dep:tray-icon", "dep:rfd"]
+
+[[bin]]
+name = "heylisten-tray"
+required-features = ["tray"]

@@ -1,10 +1,12 @@
-# heyListen config. Run `heylisten doctor` after editing.
+# heyListen config. Every setting is optional; delete a line to get the default back.
+# Run `heylisten doctor` after editing.
 
-# Folder in your Obsidian vault where meeting notes are written.
-vault = "~/Obsidian/Vault/Møter"
+# Where meeting notes (.md files) are written.
+notes_dir = "~/Desktop"
 
-# NB-Whisper GGML model used for transcription.
-whisper_model = "~/models/nb-whisper-large-q5_0.bin"
+# NB-Whisper model used for transcription. `heylisten setup` downloads it to
+# heyListen's models folder, which is the default.
+# whisper_model = "~/models/nb-whisper-large-q5_0.bin"
 
 # Ollama model used for the summary.
 ollama_model = "hf.co/NbAiLab/borealis-12b-gguf"

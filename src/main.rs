@@ -13,6 +13,7 @@ use heylisten::transcript::Who;
 use heylisten::meeting::Meeting;
 use heylisten::pipeline::{self, Event};
 use heylisten::recorder::{self, Status as RecorderStatus};
+use heylisten::setup;
 
 /// Hey, listen! Local-only meeting transcripts and summaries.
 #[derive(Parser)]
@@ -40,6 +41,8 @@ enum Command {
         /// Meeting id, or path to an audio file
         target: String,
     },
+    /// Download the speech model and pull the summary model through Ollama (about 8 GB)
+    Setup,
     /// Check models, Ollama and folders, with fixes for anything missing
     Doctor,
     /// The recorder process itself (started by `start`)
@@ -70,6 +73,7 @@ fn main() -> ExitCode {
         Command::Record { meeting } => recorder::run(&config, &meeting).map(|_| ExitCode::SUCCESS),
         Command::Launch { .. } => unreachable!(),
         Command::Process { target } => process(&config, &target),
+        Command::Setup => setup(&config),
         Command::Doctor => doctor(&config),
     });
     match result {
@@ -185,6 +189,36 @@ fn print_event(meeting_id: &str, event: Event) {
         Event::NoteWritten(path) => println!("Note: {}", path.display()),
         Event::AudioDeleted => eprintln!("Deleted audio (keep_audio = false)"),
     }
+}
+
+fn setup(config: &Config) -> Result<ExitCode> {
+    let needs = setup::Needs::check(config);
+    if !needs.anything() {
+        println!("Everything is set up. Try: heylisten start");
+        return Ok(ExitCode::SUCCESS);
+    }
+    if needs.download_bytes() > 0 {
+        eprintln!("Downloading about {:.1} GB. Nothing else is sent or received.", needs.download_bytes() as f64 / 1e9);
+    }
+    let mut last = String::new();
+    setup::run(config, |p| {
+        let line = match p {
+            setup::Progress::SpeechModel { done, total } => format!("Speech model (NB-Whisper)… {}", percent(done, total)),
+            setup::Progress::SummaryModel { done, total, .. } if total > 0 => format!("Summary model (via Ollama)… {}", percent(done, total)),
+            setup::Progress::SummaryModel { status, .. } => format!("Summary model (Ollama: {status})…"),
+        };
+        if line != last {
+            eprint!("\r\x1b[2K{line}");
+            let _ = std::io::stderr().flush();
+            last = line;
+        }
+    })?;
+    eprintln!("\nDone. Try: heylisten start");
+    Ok(ExitCode::SUCCESS)
+}
+
+fn percent(done: u64, total: u64) -> String {
+    format!("{}% of {:.1} GB", done * 100 / total.max(1), total as f64 / 1e9)
 }
 
 fn doctor(config: &Config) -> Result<ExitCode> {

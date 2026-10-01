@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow};
 use sherpa_rs::diarize::{Diarize, DiarizeConfig};
 
-use crate::config::meetings_dir;
+use crate::config::models_dir;
 use crate::transcript::{Segment, Who};
 
 const SEGMENTATION: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/segmentation.onnx"));
@@ -122,7 +122,7 @@ fn label(segments: &mut [Segment], clusters: &[Option<i32>], first: u32) -> u32 
 
 /// sherpa-onnx wants model files: unpack the embedded ones next to the meetings.
 fn model_file(name: &str, bytes: &[u8]) -> Result<PathBuf> {
-    let path = meetings_dir().with_file_name("models").join(name);
+    let path = models_dir().join(name);
     if fs::metadata(&path).map(|m| m.len()).ok() != Some(bytes.len() as u64) {
         fs::create_dir_all(path.parent().unwrap())?;
         fs::write(&path, bytes)?;

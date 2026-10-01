@@ -11,7 +11,9 @@
     {
       devShells = forAll (pkgs: {
         default = pkgs.mkShell {
-          packages = with pkgs; [ cargo rustc rustfmt clippy rust-analyzer cmake pkg-config ];
+          packages = with pkgs; [ cargo rustc rustfmt clippy rust-analyzer cmake pkg-config ]
+            # Mic capture (cpal) and the tray app (GTK + AppIndicator) on Linux.
+            ++ lib.optionals stdenv.hostPlatform.isLinux [ alsa-lib gtk3 libayatana-appindicator xdotool ];
           # whisper-rs-sys runs bindgen.
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
         };

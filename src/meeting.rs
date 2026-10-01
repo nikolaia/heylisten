@@ -19,6 +19,9 @@ pub struct Meeting {
     /// The recorder transcribed every chunk live, so the transcript doesn't need redoing.
     #[serde(default)]
     pub live_complete: bool,
+    /// The note written for this meeting, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,11 +90,23 @@ impl Meeting {
         Ok(meeting)
     }
 
+    /// The newest notes that still exist, newest first.
+    pub fn recent_notes(limit: usize) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(meetings_dir()) else { return Vec::new() };
+        let mut meetings: Vec<Meeting> = entries
+            .flatten()
+            .filter_map(|e| fs::read_to_string(e.path().join("meeting.json")).ok())
+            .filter_map(|text| serde_json::from_str(&text).ok())
+            .collect();
+        meetings.sort_by_key(|m| std::cmp::Reverse(m.start));
+        meetings.into_iter().filter_map(|m| m.note).filter(|n| n.is_file()).take(limit).collect()
+    }
+
     pub fn create(title: String, start: DateTime<Local>) -> Result<Meeting> {
         let base = start.format("%Y-%m-%d-%H%M%S").to_string();
         for n in 1..100 {
             let id = if n == 1 { base.clone() } else { format!("{base}-{n}") };
-            let meeting = Meeting { id, title: title.clone(), start, end: start, live_complete: false };
+            let meeting = Meeting { id, title: title.clone(), start, end: start, live_complete: false, note: None };
             if !meeting.dir().exists() {
                 fs::create_dir_all(meeting.dir())?;
                 meeting.save()?;

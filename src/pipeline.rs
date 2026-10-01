@@ -113,7 +113,10 @@ pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, on_event: O
 
     let model_name = config.whisper_model.file_stem().and_then(|s| s.to_str()).unwrap_or("whisper");
     let contents = note::render(meeting, &transcript, model_name, summary.as_ref());
-    let note_path = note::write(&config.vault, meeting, &contents)?;
+    let note_path = note::write(&config.notes_dir, meeting, &contents)?;
+    let mut done = meeting.clone();
+    done.note = Some(note_path.clone());
+    done.save()?;
     on_event(Event::NoteWritten(note_path.clone()));
 
     if !config.keep_audio && summary.is_some() {

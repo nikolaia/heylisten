@@ -7,15 +7,32 @@ use serde::Deserialize;
 const DEFAULT_CONFIG: &str = include_str!("default-config.toml");
 const DEFAULT_PROMPT: &str = include_str!("summary-prompt.md");
 
+/// Every key is optional; the defaults suit a fresh install.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
-    pub vault: PathBuf,
+    /// Where notes are written. `vault` is its old name.
+    #[serde(alias = "vault")]
+    pub notes_dir: PathBuf,
     pub whisper_model: PathBuf,
     pub ollama_model: String,
     pub ollama_url: String,
     pub keep_audio: bool,
 }
+
+impl Default for Config {
+    fn default() -> Config {
+        Config {
+            notes_dir: "~/Desktop".into(),
+            whisper_model: models_dir().join(WHISPER_MODEL_FILE),
+            ollama_model: "hf.co/NbAiLab/borealis-12b-gguf".into(),
+            ollama_url: "http://localhost:11434".into(),
+            keep_audio: false,
+        }
+    }
+}
+
+pub const WHISPER_MODEL_FILE: &str = "nb-whisper-large-q5_0.bin";
 
 impl Config {
     /// Loads the config file, creating it and the summary prompt with defaults on first run.
@@ -30,9 +47,20 @@ impl Config {
         let text = fs::read_to_string(&path)?;
         let mut config: Config =
             toml::from_str(&text).with_context(|| format!("invalid config in {}", path.display()))?;
-        config.vault = expand_home(&config.vault);
+        config.notes_dir = expand_home(&config.notes_dir);
         config.whisper_model = expand_home(&config.whisper_model);
         Ok(config)
+    }
+
+    /// Saves a new notes folder to the config file, keeping its comments.
+    pub fn set_notes_dir(&mut self, dir: &Path) -> Result<()> {
+        let path = config_path();
+        let mut doc: toml_edit::DocumentMut = fs::read_to_string(&path)?.parse()?;
+        doc.remove("vault");
+        doc["notes_dir"] = toml_edit::value(dir.to_string_lossy().as_ref());
+        fs::write(&path, doc.to_string())?;
+        self.notes_dir = dir.to_path_buf();
+        Ok(())
     }
 
     /// True if `ollama_url` points at this machine.
@@ -61,9 +89,19 @@ pub fn prompt_path() -> PathBuf {
     config_path().with_file_name("summary-prompt.md")
 }
 
-/// Where meeting folders live: the platform data dir.
+/// heyListen's own folder in the platform data dir.
+pub fn data_dir() -> PathBuf {
+    dirs::data_dir().unwrap_or_else(home).join("heylisten")
+}
+
+/// Where meeting folders live.
 pub fn meetings_dir() -> PathBuf {
-    dirs::data_dir().unwrap_or_else(home).join("heylisten").join("meetings")
+    data_dir().join("meetings")
+}
+
+/// Where `setup` puts models.
+pub fn models_dir() -> PathBuf {
+    data_dir().join("models")
 }
 
 fn home() -> PathBuf {
@@ -90,6 +128,13 @@ mod tests {
     #[test]
     fn default_config_parses() {
         toml::from_str::<Config>(DEFAULT_CONFIG).unwrap();
+    }
+
+    #[test]
+    fn old_vault_key_still_works() {
+        let c: Config = toml::from_str("vault = \"~/Notes\"").unwrap();
+        assert_eq!(c.notes_dir, PathBuf::from("~/Notes"));
+        assert_eq!(c.ollama_url, "http://localhost:11434");
     }
 
     #[test]

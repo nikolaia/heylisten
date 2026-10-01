@@ -1,4 +1,5 @@
-//! The Obsidian note: frontmatter + transcript. User-facing text is Norwegian.
+//! The meeting note: a Markdown file with YAML frontmatter, then summary and transcript.
+//! User-facing text is Norwegian.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -47,15 +48,15 @@ pub fn render(meeting: &Meeting, transcript: &Transcript, transcription_model: &
     out
 }
 
-/// Writes `<vault>/<date> <title>.md`, never overwriting: adds ` (2)`, ` (3)`…
-pub fn write(vault: &Path, meeting: &Meeting, contents: &str) -> Result<PathBuf> {
-    fs::create_dir_all(vault)?;
+/// Writes `<dir>/<date> <title>.md`, never overwriting: adds ` (2)`, ` (3)`…
+pub fn write(dir: &Path, meeting: &Meeting, contents: &str) -> Result<PathBuf> {
+    fs::create_dir_all(dir)?;
     let title: String = meeting.title.chars().filter(|c| !r#"/\:*?"<>|"#.contains(*c)).collect();
     let base = format!("{} {}", meeting.start.format("%Y-%m-%d"), title.trim());
-    let mut path = vault.join(format!("{base}.md"));
+    let mut path = dir.join(format!("{base}.md"));
     let mut n = 2;
     while path.exists() {
-        path = vault.join(format!("{base} ({n}).md"));
+        path = dir.join(format!("{base} ({n}).md"));
         n += 1;
     }
     fs::write(&path, contents)?;
@@ -81,6 +82,7 @@ mod tests {
             start: Local.with_ymd_and_hms(2026, 10, 1, 9, 0, 0).unwrap(),
             end: Local.with_ymd_and_hms(2026, 10, 1, 9, 47, 0).unwrap(),
             live_complete: false,
+            note: None,
         };
         let transcript = Transcript::merge(vec![vec![
             Segment { start_ms: 4_000, end_ms: 6_000, who: Who::Me, text: "Hei.".into() },
