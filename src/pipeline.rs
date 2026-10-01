@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 
 use crate::audio;
-use crate::config::Config;
+use crate::config::{Config, SummaryEngine};
 use crate::diarize;
 use crate::live::{self, Chunker};
 use crate::meeting::{Meeting, Track};
@@ -102,12 +102,12 @@ pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, on_event: O
     diarize::renumber(&mut transcript.segments);
     fs::write(meeting.dir().join("transcript.json"), serde_json::to_string_pretty(&transcript)?)?;
 
-    if !config.ollama_is_local() {
+    if config.summary_engine == SummaryEngine::Ollama && !config.ollama_is_local() {
         on_event(Event::SendingOffMachine(config.ollama_url.clone()));
     }
     on_event(Event::Summarizing { part: 1, parts: 1 });
     let summary = summarize::summarize(config, &transcript, |part, parts| on_event(Event::Summarizing { part, parts }))
-        .map(|text| Summary { model: summarize::short_name(&config.ollama_model).to_string(), text })
+        .map(|text| Summary { model: summarize::model_name(config).to_string(), text })
         .inspect_err(|e| on_event(Event::SummaryFailed(format!("{e:#}"))))
         .ok();
 

@@ -1,11 +1,11 @@
-//! The summary: transcript → Ollama → Norwegian Markdown.
+//! The summary: transcript → Borealis (built in, or through Ollama) → Norwegian Markdown.
 
 use std::fs;
 
 use anyhow::{Context, Result};
 
-use crate::config::{Config, prompt_path};
-use crate::ollama;
+use crate::config::{Config, SummaryEngine, prompt_path};
+use crate::{engine, ollama};
 use crate::transcript::{Segment, Transcript};
 
 /// Bigger windows cost RAM and time without helping a meeting summary much.
@@ -15,20 +15,44 @@ const ANSWER_TOKENS: u64 = 2_048;
 /// Rough Norwegian token estimate. Errs on the safe side.
 const CHARS_PER_TOKEN: u64 = 3;
 
+/// Whoever writes the summary.
+enum Writer<'a> {
+    Builtin(engine::Server),
+    Ollama { url: &'a str, model: &'a str },
+}
+
+impl Writer<'_> {
+    fn chat(&self, num_ctx: u64, system: &str, user: &str) -> Result<String> {
+        match self {
+            Writer::Builtin(server) => server.chat(system, user),
+            Writer::Ollama { url, model } => ollama::chat(url, model, num_ctx, system, user),
+        }
+    }
+}
+
 /// Returns the summary Markdown. `on_part(i, n)` is called before each part when the transcript is split.
 pub fn summarize(config: &Config, transcript: &Transcript, mut on_part: impl FnMut(usize, usize)) -> Result<String> {
     let path = prompt_path();
     let prompt = fs::read_to_string(&path).with_context(|| format!("can't read {}", path.display()))?;
-    let (url, model) = (&config.ollama_url, &config.ollama_model);
-    let num_ctx = ollama::context_length(url, model)
-        .with_context(|| format!("Ollama not reachable at {url}, or model {model} not pulled"))?
-        .unwrap_or(8_192)
-        .min(MAX_CTX);
+    let (writer, num_ctx) = match config.summary_engine {
+        SummaryEngine::Builtin => {
+            let model = engine::borealis_path().context("the summary model isn't downloaded yet (run heylisten setup)")?;
+            (Writer::Builtin(engine::Server::start(&model, MAX_CTX)?), MAX_CTX)
+        }
+        SummaryEngine::Ollama => {
+            let (url, model) = (config.ollama_url.as_str(), config.ollama_model.as_str());
+            let num_ctx = ollama::context_length(url, model)
+                .with_context(|| format!("Ollama not reachable at {url}, or model {model} not pulled"))?
+                .unwrap_or(8_192)
+                .min(MAX_CTX);
+            (Writer::Ollama { url, model }, num_ctx)
+        }
+    };
     let budget_chars = num_ctx.saturating_sub(prompt.len() as u64 / CHARS_PER_TOKEN + ANSWER_TOKENS) * CHARS_PER_TOKEN;
 
     let parts = split(&transcript.segments, budget_chars as usize);
     if parts.len() == 1 {
-        return ollama::chat(url, model, num_ctx, &prompt, &format!("Transkripsjon:\n\n{}", parts[0]));
+        return writer.chat(num_ctx, &prompt, &format!("Transkripsjon:\n\n{}", parts[0]));
     }
     let n = parts.len();
     let mut summaries = Vec::new();
@@ -38,13 +62,21 @@ pub fn summarize(config: &Config, transcript: &Transcript, mut on_part: impl FnM
             "Dette er del {} av {n} av et langt møte. Lag referat bare for denne delen.\n\nTranskripsjon:\n\n{part}",
             i + 1
         );
-        summaries.push(format!("# Del {}\n\n{}", i + 1, ollama::chat(url, model, num_ctx, &prompt, &user)?));
+        summaries.push(format!("# Del {}\n\n{}", i + 1, writer.chat(num_ctx, &prompt, &user)?));
     }
     let user = format!(
         "Her er referater av hver del av et langt møte, i rekkefølge. Slå dem sammen til ett referat for hele møtet.\n\n{}",
         summaries.join("\n\n")
     );
-    ollama::chat(url, model, num_ctx, &prompt, &user)
+    writer.chat(num_ctx, &prompt, &user)
+}
+
+/// The summary model's name for the note's frontmatter.
+pub fn model_name(config: &Config) -> &str {
+    match config.summary_engine {
+        SummaryEngine::Builtin => "borealis-12b",
+        SummaryEngine::Ollama => short_name(&config.ollama_model),
+    }
 }
 
 /// "hf.co/NbAiLab/borealis-12b-gguf:latest" → "borealis-12b".

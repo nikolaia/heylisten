@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use crate::config::{Config, meetings_dir};
+use crate::config::{Config, SummaryEngine, meetings_dir};
 use crate::ollama;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +58,22 @@ pub fn run(config: &Config) -> Vec<Check> {
         false => fail(format!("Meetings folder not writable: {}", meetings.display()), "Check the folder's permissions"),
     });
 
+    if config.summary_engine == SummaryEngine::Builtin {
+        checks.push(match (crate::engine::available(), crate::engine::installed()) {
+            (false, _) => fail(
+                "The built-in summary engine isn't available on this platform yet",
+                "Use summary_engine = \"ollama\" in the config",
+            ),
+            (true, true) => pass("Built-in summary engine (llama.cpp)"),
+            (true, false) => fail("Built-in summary engine not downloaded", "heylisten setup"),
+        });
+        checks.push(match crate::engine::borealis_path() {
+            Some(path) => pass(format!("Summary model {}", path.display())),
+            None => fail("Summary model (Borealis) not downloaded", "heylisten setup"),
+        });
+        return checks;
+    }
+
     if !config.ollama_is_local() {
         checks.push(Check {
             status: Status::Warn,
@@ -69,7 +85,10 @@ pub fn run(config: &Config) -> Vec<Check> {
     match ollama::list_models(&config.ollama_url) {
         Err(_) => checks.push(fail(
             format!("Ollama not reachable at {}", config.ollama_url),
-            format!("Install Ollama from {} and open it (or start it: `ollama serve`)", crate::setup::OLLAMA_DOWNLOAD),
+            format!(
+                "Install Ollama from {} and open it, or use summary_engine = \"builtin\"",
+                crate::setup::OLLAMA_DOWNLOAD
+            ),
         )),
         Ok(models) => {
             checks.push(pass(format!("Ollama running at {}", config.ollama_url)));

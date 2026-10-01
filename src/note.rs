@@ -38,7 +38,7 @@ pub fn render(meeting: &Meeting, transcript: &Transcript, transcription_model: &
     let _ = writeln!(out, "---\n");
 
     if let Some(summary) = summary {
-        let _ = writeln!(out, "{}\n", summary.text.trim());
+        let _ = writeln!(out, "{}\n", tasks_as_checkboxes(summary.text.trim()));
     }
 
     let _ = writeln!(out, "## Transkripsjon\n");
@@ -46,6 +46,24 @@ pub fn render(meeting: &Meeting, transcript: &Transcript, transcription_model: &
         let _ = writeln!(out, "**{}** [{}]\n{}\n", p.who.label(), timestamp(p.start_ms), p.text);
     }
     out
+}
+
+/// Models don't always write tasks as `- [ ]`; make every list item under "## Oppgaver" one.
+fn tasks_as_checkboxes(summary: &str) -> String {
+    let mut in_tasks = false;
+    let lines: Vec<String> = summary
+        .lines()
+        .map(|line| {
+            if line.starts_with("## ") {
+                in_tasks = line.trim() == "## Oppgaver";
+            }
+            match line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
+                Some(task) if in_tasks && !task.starts_with('[') && !task.trim().eq_ignore_ascii_case("ingen") => format!("- [ ] {task}"),
+                _ => line.to_string(),
+            }
+        })
+        .collect();
+    lines.join("\n")
 }
 
 /// Writes `<dir>/<date> <title>.md`, never overwriting: adds ` (2)`, ` (3)`…
@@ -97,5 +115,17 @@ mod tests {
         assert!(note.contains("---\n\n## Sammendrag\nKort.\n\n## Transkripsjon\n"));
         assert!(note.contains("**Meg** [00:00:04]\nHei.\n"));
         assert!(note.contains("**Taler 1** [01:02:05]\nHallo.\n"));
+    }
+
+    #[test]
+    fn tasks_become_checkboxes() {
+        let summary = "## Beslutninger\n- Øke budsjettet\n\n## Oppgaver\n- Forberede tall (ansvarlig: Taler 2)\n- [ ] Booke rom\n* Sende referat\n\n## Tema\n- Budsjett";
+        let out = tasks_as_checkboxes(summary);
+        assert!(out.contains("- Øke budsjettet"));
+        assert!(out.contains("- [ ] Forberede tall (ansvarlig: Taler 2)"));
+        assert!(out.contains("- [ ] Booke rom"));
+        assert!(out.contains("- [ ] Sende referat"));
+        assert!(out.contains("## Tema\n- Budsjett"));
+        assert_eq!(tasks_as_checkboxes("## Oppgaver\n- Ingen"), "## Oppgaver\n- Ingen");
     }
 }

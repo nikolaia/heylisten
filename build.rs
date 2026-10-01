@@ -33,7 +33,8 @@ fn main() {
 }
 
 fn download(url: &str, dest: &Path) {
-    run(Command::new("curl").args(["-fsSL", "-o"]).arg(dest).arg(url));
+    // HTTPS only, redirects included; the SHA-256 check below is what makes the file trustworthy.
+    run(Command::new("curl").args(["-fsSL", "--proto", "=https", "--proto-redir", "=https", "-o"]).arg(dest).arg(url));
 }
 
 fn verified(path: &Path, sha256: &str) -> bool {

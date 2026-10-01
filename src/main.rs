@@ -204,7 +204,8 @@ fn setup(config: &Config) -> Result<ExitCode> {
     setup::run(config, |p| {
         let line = match p {
             setup::Progress::SpeechModel { done, total } => format!("Speech model (NB-Whisper)… {}", percent(done, total)),
-            setup::Progress::SummaryModel { done, total, .. } if total > 0 => format!("Summary model (via Ollama)… {}", percent(done, total)),
+            setup::Progress::Engine { done, total } => format!("Summary engine (llama.cpp)… {}", percent(done, total)),
+            setup::Progress::SummaryModel { done, total, .. } if total > 0 => format!("Summary model (Borealis)… {}", percent(done, total)),
             setup::Progress::SummaryModel { status, .. } => format!("Summary model (Ollama: {status})…"),
         };
         if line != last {
@@ -218,7 +219,8 @@ fn setup(config: &Config) -> Result<ExitCode> {
 }
 
 fn percent(done: u64, total: u64) -> String {
-    format!("{}% of {:.1} GB", done * 100 / total.max(1), total as f64 / 1e9)
+    let size = if total >= 1_000_000_000 { format!("{:.1} GB", total as f64 / 1e9) } else { format!("{} MB", total / 1_000_000) };
+    format!("{}% of {size}", done * 100 / total.max(1))
 }
 
 fn doctor(config: &Config) -> Result<ExitCode> {

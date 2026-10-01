@@ -47,7 +47,7 @@ Hei og velkommen, skal vi starte med budsjettet?
 - ⚡ **Live transcript** with [NB-Whisper](https://huggingface.co/NbAiLab/nb-whisper-large), the National Library of Norway's Whisper. By the time you stop, the transcript is already done.
 - 🗣️ **Tells speakers apart**, both remote people and several people sharing one mic in a meeting room.
 - 🔁 **Echo removal**, so not wearing headphones doesn't put every line in the note twice.
-- 📝 **Norwegian summary** from [Borealis](https://huggingface.co/NbAiLab/borealis-12b-gguf) via [Ollama](https://ollama.com): summary, decisions, `- [ ]` tasks and topics. The prompt is a file you can edit.
+- 📝 **Norwegian summary** from [Borealis](https://huggingface.co/NbAiLab/borealis-12b-gguf), run by heyListen itself through llama.cpp, with no extra install. If you use [Ollama](https://ollama.com), you can pick any of its models instead. You get a summary, decisions, `- [ ]` tasks and topics, and the prompt is a file you can edit.
 - 📄 **Plain Markdown notes** with YAML frontmatter, so they work as-is in any notes app that reads Markdown.
 - 💾 **Crash-safe.** Audio streams to disk as it's recorded, so a crash or a closed terminal keeps everything recorded so far.
 
@@ -55,9 +55,8 @@ Hei og velkommen, skal vi starte med budsjettet?
 
 1. **[Download heyListen](https://github.com/nikolaia/heylisten/releases/latest/download/heyListen-macos-arm64.zip)**, unzip it, and move **heyListen.app** to *Applications*.
 2. **Open it.** The app isn't notarized by Apple yet, so macOS blocks it the first time. Go to System Settings → Privacy & Security, scroll down and click **Open Anyway**. You only do this once.
-3. Click the **ring ◯ in your menu bar** and choose **Download models (~8 GB)…**. This fetches the speech model (1.1 GB) and the summary model (7 GB). Progress is shown in the menu.
-4. For summaries, choose **Install Ollama…** if it's in the menu, install and open Ollama, then click **Download models** again for the summary model. Without Ollama you still get transcripts.
-5. Choose **Start recording**. On the first recording, macOS asks for permission to use the **microphone** and to **record system audio**. Allow both.
+3. Click the **ring ◯ in your menu bar** and choose **Download models (~8.4 GB)…**. This fetches the Norwegian speech model (1.1 GB), the summary engine (12 MB) and the Norwegian summary model (7.3 GB). Progress is shown in the menu. If Ollama already has Borealis, heyListen uses that copy and skips the 7.3 GB.
+4. Choose **Start recording**. On the first recording, macOS asks for permission to use the **microphone** and to **record system audio**. Allow both.
 
 | In the menu | |
 |---|---|
@@ -65,6 +64,7 @@ Hei og velkommen, skal vi starte med budsjettet?
 | 🔴 red dot + `00:12:34` | Recording |
 | 🟠 orange dot | Making the note, or downloading models |
 | **Recent notes** | Your last 10 notes; click to open |
+| **Summary model** | Built-in Borealis, or any model in your Ollama |
 | **Set notes location…** | Where notes go (default: Desktop) |
 
 To have heyListen start with your Mac, add it under System Settings → General → Login Items.
@@ -83,7 +83,7 @@ heylisten status               # recording or idle
 heylisten stop                 # stop and write the note
 heylisten process memo.m4a     # transcribe an audio file (m4a, mp3, wav, flac, ogg)
 heylisten process <meeting-id> # redo a meeting from its saved audio
-heylisten setup                # download the models
+heylisten setup                # download the models and the summary engine
 heylisten doctor               # check everything, with copy-paste fixes
 ```
 
@@ -96,7 +96,8 @@ The tray app and the CLI share one recorder, so you can start a recording in one
 ```toml
 notes_dir = "~/Desktop"                             # where notes go (the tray can set this)
 # whisper_model = "~/models/nb-whisper-large-q5_0.bin"  # default: heyListen's models folder
-ollama_model = "hf.co/NbAiLab/borealis-12b-gguf"
+summary_engine = "builtin"                          # or "ollama" (the tray can set this)
+ollama_model = "hf.co/NbAiLab/borealis-12b-gguf"    # used with summary_engine = "ollama"
 ollama_url = "http://localhost:11434"               # keep it local
 keep_audio = false                                  # delete the audio once the note is written
 ```
@@ -114,7 +115,7 @@ flowchart LR
     live --> view[Menu bar / heylisten watch]
     wav -- stop --> dia[Speakers<br/>pyannote + CAM++]
     live -- stop --> dia
-    dia --> sum[Summary<br/>Borealis via Ollama]
+    dia --> sum[Summary<br/>Borealis via llama.cpp or Ollama]
     sum --> note[📄 Markdown note]
 ```
 
@@ -122,14 +123,35 @@ flowchart LR
 - **Live.** Each track is cut into chunks at pauses and transcribed as you talk. After stop, only speaker labelling and the summary are left.
 - **Speakers.** After stop, voices on both tracks are told apart and numbered `Taler 1`, `Taler 2`… in order of first appearance. If the mic hears only one voice, it stays `Meg`. In a meeting room where several people share a mic, every voice becomes a `Taler`, because heyListen can't know which one is you.
 - **Language.** Always Norwegian. NB-Whisper translates English speech into Norwegian rather than transcribing it.
-- **If Ollama is down,** the note is written without a summary, the audio is kept, and `heylisten process <id>` retries later.
+- **Summary.** By default heyListen starts llama.cpp's `llama-server` on localhost just for the summary, then stops it, so the 7 GB model is only in memory while it's needed.
+- **If the summary fails** (for example the model isn't downloaded, or Ollama is down), the note is written without a summary, the audio is kept, and `heylisten process <id>` retries later.
 
-Meetings (audio while recording, transcripts, metadata) are kept in `~/Library/Application Support/heylisten/meetings/`. The models are in `~/Library/Application Support/heylisten/models/`. The vocabulary is in [CONTEXT.md](CONTEXT.md) and the design decisions in [docs/adr](docs/adr).
+Meetings (audio while recording, transcripts, metadata) are kept in `~/Library/Application Support/heylisten/meetings/`. The models are in `~/Library/Application Support/heylisten/models/` and the summary engine in `…/heylisten/engine/`. The vocabulary is in [CONTEXT.md](CONTEXT.md) and the design decisions in [docs/adr](docs/adr).
 
-## 🔒 Privacy
+## 🔒 Privacy & security
 
-- **The only downloads** are the speech model (from Hugging Face, checked against a pinned SHA-256) and the summary model (pulled by your local Ollama). Both happen only when you click *Download models* or run `heylisten setup`. See [ADR 0004](docs/adr/0004-models-downloaded-on-request.md).
-- **Audio and transcripts** never leave your Mac. The only thing that receives them is Ollama at `ollama_url`, which is `localhost` unless you change it. If you point it elsewhere, heyListen warns you in red every time.
+**Your meeting data stays on your Mac.** Audio, transcripts and summaries are written only to your disk. The built-in summary engine listens only on `127.0.0.1`, and only for the length of a summary. It also requires a random key that's new each time, so other programs can't use it meanwhile. With the Ollama engine, transcripts go to `ollama_url`, which is `localhost` unless you change it. If you point it anywhere else, heyListen warns you in red every time.
+
+**Downloads only happen when you ask**, by clicking *Download models* or running `heylisten setup`, and each one is verified:
+
+| What | From | Verified by |
+|---|---|---|
+| NB-Whisper speech model (1.1 GB) | Hugging Face | SHA-256 pinned in the source |
+| Borealis summary model (7.3 GB) | Hugging Face | SHA-256 pinned in the source |
+| llama.cpp summary engine (12 MB) | llama.cpp's GitHub releases | SHA-256 pinned in the source |
+| Speaker-recognition models | GitHub (at build time) | SHA-256 pinned in `build.rs` |
+| Ollama models (Ollama engine only) | Your Ollama | Ollama's own digest checks |
+
+Downloads use HTTPS only, redirects included. A file that doesn't match its checksum is deleted, never used, so someone intercepting the connection (or a compromised mirror) can only make the download fail. Interrupted downloads resume, and the checksum covers the whole file, resumed part included. See [ADR 0004](docs/adr/0004-models-downloaded-on-request.md) and [ADR 0005](docs/adr/0005-built-in-summary-engine.md).
+
+**Releases.** The app is built by [GitHub Actions](.github/workflows/release.yml) straight from this repository. Every action is pinned to a commit SHA, dependencies are locked (`Cargo.lock`) and checked with `cargo audit`, and each release includes its SHA-256 and a signed build-provenance attestation. To check a download:
+
+```bash
+shasum -a 256 -c SHA256SUMS                                    # matches the release's checksum
+gh attestation verify heyListen-macos-arm64.zip --repo nikolaia/heylisten   # built by this repo's workflow
+```
+
+**What heyListen doesn't protect against:** other software running as your user. It can read your meeting folders and notes just like any other files you own. The app isn't notarized by Apple yet (see below), so your trust rests on the checks above.
 
 ## 🍎 macOS permissions
 
@@ -157,7 +179,7 @@ The build downloads sherpa-onnx and two small speaker-recognition models, which 
 | Menu bar app with first-run setup, recent notes, notes location | ✅ macOS |
 | Mic + system audio, live transcript, echo removal | ✅ macOS |
 | Speakers, including several people on one mic | ✅ |
-| Norwegian summary via Ollama | ✅ |
+| Norwegian summary, built in (llama.cpp) or via Ollama | ✅ (built-in engine: Apple Silicon only so far) |
 | Linux (PipeWire recording, tray via AppIndicator) | 🚧 not implemented or tested yet |
 | Notarized app | 💭 needs an Apple Developer ID |
 
@@ -166,7 +188,7 @@ The build downloads sherpa-onnx and two small speaker-recognition models, which 
 - [NB-Whisper](https://huggingface.co/NbAiLab/nb-whisper-large) and [Borealis](https://huggingface.co/NbAiLab/borealis-12b-gguf) from the National Library of Norway.
 - [whisper.cpp](https://github.com/ggml-org/whisper.cpp) via [whisper-rs](https://crates.io/crates/whisper-rs).
 - [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) via [sherpa-rs](https://github.com/thewh1teagle/sherpa-rs), with [pyannote segmentation 3.0](https://huggingface.co/pyannote/segmentation-3.0) (MIT) and [3D-Speaker CAM++](https://github.com/modelscope/3D-Speaker) (Apache-2.0).
-- [tray-icon](https://github.com/tauri-apps/tray-icon), [rfd](https://github.com/PolyMeilex/rfd) and [Ollama](https://ollama.com).
+- [llama.cpp](https://github.com/ggml-org/llama.cpp), [tray-icon](https://github.com/tauri-apps/tray-icon), [rfd](https://github.com/PolyMeilex/rfd) and [Ollama](https://ollama.com).
 - Ideas from [vaqlo](https://github.com/ivshestakov/vaqlo.app).
 
 ## License

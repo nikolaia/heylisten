@@ -8,10 +8,12 @@ notes_dir = "~/Desktop"
 # heyListen's models folder, which is the default.
 # whisper_model = "~/models/nb-whisper-large-q5_0.bin"
 
-# Ollama model used for the summary.
-ollama_model = "hf.co/NbAiLab/borealis-12b-gguf"
+# Who writes the summary: "builtin" (Borealis, run by heyListen itself) or "ollama".
+summary_engine = "builtin"
 
-# Keep this on localhost. Anything else sends transcripts off this machine.
+# With summary_engine = "ollama": the model, and where Ollama runs. Keep the URL on
+# localhost; anything else sends transcripts off this machine.
+ollama_model = "hf.co/NbAiLab/borealis-12b-gguf"
 ollama_url = "http://localhost:11434"
 
 # Keep the recorded audio after the note is written.

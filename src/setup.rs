@@ -1,5 +1,6 @@
-//! First-run setup: fetches the speech model and has Ollama pull the summary model.
-//! This is the only time heyListen downloads anything, and only when asked (see docs/adr/0004).
+//! First-run setup: fetches the speech model, and the summary engine and model (or has Ollama
+//! pull it). This is the only time heyListen downloads anything, and only when asked
+//! (see docs/adr/0004 and 0005).
 
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -8,55 +9,73 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
-use crate::config::Config;
-use crate::ollama;
+use crate::config::{Config, SummaryEngine};
+use crate::{engine, ollama};
 
 /// NB-Whisper large, q5_0 GGML, from the National Library of Norway.
 pub const WHISPER_URL: &str = "https://huggingface.co/NbAiLab/nb-whisper-large/resolve/main/ggml-model-q5_0.bin";
 const WHISPER_SHA256: &str = "feb5951ae694a62cfeb81fb501f6cfa8cc50d96bcddb1e4e8215f7006bac23a2";
 pub const WHISPER_BYTES: u64 = 1_081_140_203;
-/// Roughly what Ollama downloads for Borealis 12B (Q4_K_M).
-pub const SUMMARY_MODEL_BYTES: u64 = 7_300_000_000;
 pub const OLLAMA_DOWNLOAD: &str = "https://ollama.com/download";
 
-/// What's still missing.
+/// What's still missing for the configured engines.
 pub struct Needs {
     pub whisper_model: bool,
-    pub ollama_running: bool,
-    pub ollama_model: bool,
+    /// Built-in engine: llama.cpp isn't downloaded yet.
+    pub engine: bool,
+    /// Built-in: Borealis isn't on disk (ours or Ollama's). Ollama: the model isn't pulled.
+    pub summary_model: bool,
+    /// Ollama engine only: Ollama isn't running.
+    pub ollama_missing: bool,
+    /// Models Ollama has, if it's running (to choose from).
+    pub ollama_models: Vec<String>,
 }
 
 impl Needs {
     pub fn check(config: &Config) -> Needs {
-        let models = ollama::list_models(&config.ollama_url);
+        let ollama = ollama::list_models(&config.ollama_url).ok();
+        let builtin = config.summary_engine == SummaryEngine::Builtin;
         Needs {
             whisper_model: !config.whisper_model.is_file(),
-            ollama_running: models.is_ok(),
-            ollama_model: models.map_or(true, |m| !ollama::has_model(&m, &config.ollama_model)),
+            engine: builtin && !engine::installed(),
+            summary_model: match &ollama {
+                _ if builtin => engine::borealis_path().is_none(),
+                Some(models) => !ollama::has_model(models, &config.ollama_model),
+                None => true,
+            },
+            ollama_missing: !builtin && ollama.is_none(),
+            ollama_models: ollama.unwrap_or_default(),
         }
     }
 
     pub fn anything(&self) -> bool {
-        self.whisper_model || !self.ollama_running || self.ollama_model
+        self.whisper_model || self.engine || self.summary_model || self.ollama_missing
+    }
+
+    /// Whether "Download models" can do something now (Ollama models need Ollama running).
+    pub fn downloadable(&self) -> bool {
+        self.whisper_model || self.engine || (self.summary_model && !self.ollama_missing)
     }
 
     /// Bytes still to download, for "downloads ~8 GB".
     pub fn download_bytes(&self) -> u64 {
-        (self.whisper_model as u64 * WHISPER_BYTES) + (self.ollama_model as u64 * SUMMARY_MODEL_BYTES)
+        (self.whisper_model as u64 * WHISPER_BYTES) + (self.summary_model as u64 * engine::BOREALIS_BYTES)
     }
 }
 
 pub enum Progress {
     /// Bytes of the speech model so far.
     SpeechModel { done: u64, total: u64 },
-    /// Ollama pulling the summary model.
+    /// Bytes of llama.cpp so far.
+    Engine { done: u64, total: u64 },
+    /// Bytes of the summary model so far (`status` is Ollama's, when it pulls).
     SummaryModel { status: String, done: u64, total: u64 },
 }
 
-/// Downloads whatever is missing. Needs Ollama running for the summary model.
+/// Downloads whatever is missing. With summary_engine = "ollama", needs Ollama running.
 pub fn run(config: &Config, mut progress: impl FnMut(Progress)) -> Result<()> {
     download_speech_model(config, &mut progress)?;
-    pull_summary_model(config, &mut progress)
+    get_summary_model(config, &mut progress)
 }
 
 /// The NB-Whisper model, if it isn't there yet.
@@ -69,10 +88,19 @@ pub fn download_speech_model(config: &Config, mut progress: impl FnMut(Progress)
     })
 }
 
-/// Has Ollama pull the summary model, if it hasn't yet.
-pub fn pull_summary_model(config: &Config, mut progress: impl FnMut(Progress)) -> Result<()> {
+/// The summary engine and model: llama.cpp + Borealis, or an Ollama pull.
+pub fn get_summary_model(config: &Config, mut progress: impl FnMut(Progress)) -> Result<()> {
+    if config.summary_engine == SummaryEngine::Builtin {
+        if !engine::installed() {
+            engine::install(|done, total| progress(Progress::Engine { done, total }))?;
+        }
+        if engine::borealis_path().is_none() {
+            engine::download_borealis(|done, total| progress(Progress::SummaryModel { status: String::new(), done, total }))?;
+        }
+        return Ok(());
+    }
     let models = ollama::list_models(&config.ollama_url)
-        .with_context(|| format!("Ollama isn't running. Install it from {OLLAMA_DOWNLOAD} and open it, then run setup again"))?;
+        .with_context(|| format!("Ollama isn't running. Install it from {OLLAMA_DOWNLOAD} and open it, or use summary_engine = \"builtin\""))?;
     if ollama::has_model(&models, &config.ollama_model) {
         return Ok(());
     }
@@ -82,7 +110,7 @@ pub fn pull_summary_model(config: &Config, mut progress: impl FnMut(Progress)) -
 }
 
 /// Downloads to `<dest>.part`, resuming an earlier attempt, checks the SHA-256, then moves it in place.
-fn download(url: &str, sha256: &str, bytes: u64, dest: &Path, mut progress: impl FnMut(u64, u64)) -> Result<()> {
+pub(crate) fn download(url: &str, sha256: &str, bytes: u64, dest: &Path, mut progress: impl FnMut(u64, u64)) -> Result<()> {
     fs::create_dir_all(dest.parent().context("bad model path")?)?;
     let part = dest.with_extension("part");
     let mut hasher = Sha256::new();
@@ -114,7 +142,9 @@ fn download(url: &str, sha256: &str, bytes: u64, dest: &Path, mut progress: impl
 
 /// Appends the rest of `url` (from byte `have`) to `part`, hashing as it goes.
 fn fetch(url: &str, part: &Path, have: &mut u64, hasher: &mut Sha256, buf: &mut [u8], progress: &mut impl FnMut(u64, u64)) -> Result<()> {
-    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(None).build().into();
+    // HTTPS all the way, redirects included. The SHA-256 check is what makes the file
+    // trustworthy, but there's no reason to let anyone downgrade the connection.
+    let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(None).https_only(true).build().into();
     let mut request = agent.get(url);
     if *have > 0 {
         request = request.header("Range", format!("bytes={have}-"));

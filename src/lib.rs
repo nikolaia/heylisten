@@ -5,6 +5,7 @@ pub mod capture;
 pub mod config;
 pub mod diarize;
 pub mod doctor;
+pub mod engine;
 pub mod live;
 pub mod meeting;
 pub mod note;

@@ -13,10 +13,10 @@ use anyhow::{Context, Result};
 use chrono::Local;
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
-use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
-use heylisten::config::Config;
+use heylisten::config::{Config, SummaryEngine};
 use heylisten::meeting::Meeting;
 use heylisten::pipeline::{self, Event as PipelineEvent};
 use heylisten::recorder::{self, Status};
@@ -51,6 +51,7 @@ struct Items {
     start: MenuItem,
     stop: MenuItem,
     recent: Submenu,
+    summary: Submenu,
     notes_dir: MenuItem,
     quit: MenuItem,
 }
@@ -64,6 +65,10 @@ struct Tray {
     error: Option<String>,
     recent: Vec<PathBuf>,
     recent_ids: HashMap<MenuId, PathBuf>,
+    /// Summary model choices: None is the built-in engine, Some is an Ollama model.
+    summary_ids: HashMap<MenuId, Option<String>>,
+    /// What the Summary model submenu was last built from.
+    summary_shown: Option<(SummaryEngine, String, Vec<String>)>,
     shown_icon: Look,
     /// Whether the setup items are in the menu right now.
     shown_download: bool,
@@ -97,7 +102,7 @@ fn main() -> Result<()> {
     MenuEvent::set_event_handler(Some(move |e| {
         let _ = menu_proxy.send_event(UserEvent::Menu(e));
     }));
-    spawn_checker(config.clone(), proxy.clone());
+    spawn_checker(proxy.clone());
 
     let items = Items {
         status: MenuItem::new("Checking setup…", false, None),
@@ -106,6 +111,7 @@ fn main() -> Result<()> {
         start: MenuItem::new("Start recording", false, None),
         stop: MenuItem::new("Stop recording", false, None),
         recent: Submenu::new("Recent notes", false),
+        summary: Submenu::new("Summary model", true),
         notes_dir: MenuItem::new("Set notes location…", true, None),
         quit: MenuItem::new("Quit heyListen", true, None),
     };
@@ -117,6 +123,7 @@ fn main() -> Result<()> {
         &items.stop,
         &PredefinedMenuItem::separator(),
         &items.recent,
+        &items.summary,
         &items.notes_dir,
         &PredefinedMenuItem::separator(),
         &items.quit,
@@ -144,6 +151,8 @@ fn main() -> Result<()> {
                     error: None,
                     recent: Vec::new(),
                     recent_ids: HashMap::new(),
+                    summary_ids: HashMap::new(),
+                    summary_shown: None,
                     shown_icon: Look::Idle,
                     shown_download: false,
                     shown_install: false,
@@ -179,6 +188,12 @@ fn main() -> Result<()> {
                     *control_flow = ControlFlow::Exit;
                 } else if let Some(note) = t.recent_ids.get(id) {
                     open(note);
+                } else if let Some(choice) = t.summary_ids.get(id).cloned() {
+                    let engine = if choice.is_some() { SummaryEngine::Ollama } else { SummaryEngine::Builtin };
+                    match config.set_summary(engine, choice.as_deref()) {
+                        Ok(()) => t.needs = Some(Needs::check(&config)),
+                        Err(e) => t.error = Some(format!("Couldn't save the summary model: {e:#}")),
+                    }
                 }
             }
             Event::UserEvent(UserEvent::Checked(needs, recent)) => {
@@ -245,8 +260,8 @@ impl Tray {
                     (Some(e), _) => e.clone(),
                     (None, None) => "Checking setup…".into(),
                     (None, Some(n)) if n.whisper_model => "Setup needed: download the models to start".into(),
-                    (None, Some(n)) if !n.ollama_running => "Ready (summaries need Ollama)".into(),
-                    (None, Some(n)) if n.ollama_model => "Ready (download the summary model for summaries)".into(),
+                    (None, Some(n)) if n.ollama_missing => "Ready (summaries need Ollama running)".into(),
+                    (None, Some(n)) if n.engine || n.summary_model => "Ready (download the Norwegian summary model for summaries)".into(),
                     (None, Some(_)) => "Ready".into(),
                 };
                 (text, None)
@@ -266,15 +281,16 @@ impl Tray {
 
         // Setup items appear only while something is missing.
         if let Some(n) = &self.needs {
-            let download = idle && (n.whisper_model || (n.ollama_running && n.ollama_model));
+            let download = idle && n.downloadable();
             if download {
                 self.items.download.set_text(format!("Download models (~{:.1} GB)…", n.download_bytes() as f64 / 1e9));
             }
             self.shown_download = show(&self.menu, &self.items.download, 1, download, self.shown_download);
-            let install = !n.ollama_running;
+            let install = n.ollama_missing;
             let at = 1 + self.shown_download as usize;
             self.shown_install = show(&self.menu, &self.items.install_ollama, at, install, self.shown_install);
         }
+        self.set_summary_choices(config);
         let dir = config.notes_dir.file_name().map_or_else(|| config.notes_dir.display().to_string(), |n| n.to_string_lossy().into());
         self.items.notes_dir.set_text(format!("Set notes location… ({dir})"));
 
@@ -291,6 +307,31 @@ impl Tray {
             };
             self.shown_icon = look;
         }
+    }
+
+    /// Rebuilds the Summary model submenu: the built-in Borealis, plus whatever Ollama has.
+    fn set_summary_choices(&mut self, config: &Config) {
+        let models = self.needs.as_ref().map(|n| n.ollama_models.clone()).unwrap_or_default();
+        let wanted = (config.summary_engine, config.ollama_model.clone(), models);
+        if self.summary_shown.as_ref() == Some(&wanted) {
+            return;
+        }
+        while self.items.summary.remove_at(0).is_some() {}
+        self.summary_ids.clear();
+        let builtin = config.summary_engine == SummaryEngine::Builtin;
+        let item = CheckMenuItem::new("Built-in: Borealis (Norwegian)", true, builtin, None);
+        let _ = self.items.summary.append(&item);
+        self.summary_ids.insert(item.id().clone(), None);
+        if !wanted.2.is_empty() {
+            let _ = self.items.summary.append(&PredefinedMenuItem::separator());
+        }
+        for model in &wanted.2 {
+            let checked = !builtin && ollama_matches(model, &config.ollama_model);
+            let item = CheckMenuItem::new(format!("Ollama: {model}"), true, checked, None);
+            let _ = self.items.summary.append(&item);
+            self.summary_ids.insert(item.id().clone(), Some(model.clone()));
+        }
+        self.summary_shown = Some(wanted);
     }
 
     /// Rebuilds the Recent notes submenu if the list changed.
@@ -322,10 +363,20 @@ fn show(menu: &Menu, item: &MenuItem, at: usize, wanted: bool, shown: bool) -> b
     wanted
 }
 
+/// Ollama lists `name:latest` for models pulled without a tag.
+fn ollama_matches(listed: &str, configured: &str) -> bool {
+    listed == configured || listed.strip_suffix(":latest") == Some(configured)
+}
+
 /// Every few seconds: what's missing, and the recent notes (also those made from the CLI).
-fn spawn_checker(config: Config, proxy: EventLoopProxy<UserEvent>) {
+/// Reads the config each time, so changes from the menu or the CLI show up.
+fn spawn_checker(proxy: EventLoopProxy<UserEvent>) {
     thread::spawn(move || {
         loop {
+            let Ok(config) = Config::load() else {
+                thread::sleep(Duration::from_secs(5));
+                continue;
+            };
             let event = UserEvent::Checked(Needs::check(&config), Meeting::recent_notes(RECENT));
             if proxy.send_event(event).is_err() {
                 return;
@@ -370,8 +421,9 @@ fn spawn_setup(config: Config, proxy: EventLoopProxy<UserEvent>) {
         let mut report = |p: Progress| {
             let step = match p {
                 Progress::SpeechModel { done, total } => format!("Downloading speech model… {}", percent(done, total)),
+                Progress::Engine { done, total } => format!("Downloading summary engine… {}", percent(done, total)),
                 Progress::SummaryModel { done, total, .. } if total > 0 => {
-                    format!("Downloading summary model… {}", percent(done, total))
+                    format!("Downloading Norwegian summary model… {}", percent(done, total))
                 }
                 Progress::SummaryModel { status, .. } => format!("Summary model: {status}…"),
             };
@@ -381,14 +433,15 @@ fn spawn_setup(config: Config, proxy: EventLoopProxy<UserEvent>) {
             }
         };
         let result = setup::download_speech_model(&config, &mut report).and_then(|()| {
-            if Needs::check(&config).ollama_running { setup::pull_summary_model(&config, &mut report) } else { Ok(()) }
+            if Needs::check(&config).ollama_missing { Ok(()) } else { setup::get_summary_model(&config, &mut report) }
         });
         let _ = proxy.send_event(UserEvent::Done(result.map(|()| None).map_err(|e| format!("Setup failed: {e:#}"))));
     });
 }
 
 fn percent(done: u64, total: u64) -> String {
-    format!("{}% of {:.1} GB", done * 100 / total.max(1), total as f64 / 1e9)
+    let size = if total >= 1_000_000_000 { format!("{:.1} GB", total as f64 / 1e9) } else { format!("{} MB", total / 1_000_000) };
+    format!("{}% of {size}", done * 100 / total.max(1))
 }
 
 fn open(target: &Path) {

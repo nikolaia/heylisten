@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-cargo build --release --features tray
+cargo build --release --locked --features tray
 
 app=target/heyListen.app
 rm -rf "$app"

@@ -15,6 +15,8 @@ pub struct Config {
     #[serde(alias = "vault")]
     pub notes_dir: PathBuf,
     pub whisper_model: PathBuf,
+    /// Which engine writes the summary: the built-in one, or Ollama with `ollama_model`.
+    pub summary_engine: SummaryEngine,
     pub ollama_model: String,
     pub ollama_url: String,
     pub keep_audio: bool,
@@ -25,6 +27,7 @@ impl Default for Config {
         Config {
             notes_dir: "~/Desktop".into(),
             whisper_model: models_dir().join(WHISPER_MODEL_FILE),
+            summary_engine: SummaryEngine::Builtin,
             ollama_model: "hf.co/NbAiLab/borealis-12b-gguf".into(),
             ollama_url: "http://localhost:11434".into(),
             keep_audio: false,
@@ -33,6 +36,15 @@ impl Default for Config {
 }
 
 pub const WHISPER_MODEL_FILE: &str = "nb-whisper-large-q5_0.bin";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SummaryEngine {
+    /// llama.cpp with Borealis, started by heyListen itself.
+    Builtin,
+    /// A model in a local Ollama.
+    Ollama,
+}
 
 impl Config {
     /// Loads the config file, creating it and the summary prompt with defaults on first run.
@@ -54,12 +66,26 @@ impl Config {
 
     /// Saves a new notes folder to the config file, keeping its comments.
     pub fn set_notes_dir(&mut self, dir: &Path) -> Result<()> {
-        let path = config_path();
-        let mut doc: toml_edit::DocumentMut = fs::read_to_string(&path)?.parse()?;
-        doc.remove("vault");
-        doc["notes_dir"] = toml_edit::value(dir.to_string_lossy().as_ref());
-        fs::write(&path, doc.to_string())?;
+        edit(|doc| {
+            doc.remove("vault");
+            doc["notes_dir"] = toml_edit::value(dir.to_string_lossy().as_ref());
+        })?;
         self.notes_dir = dir.to_path_buf();
+        Ok(())
+    }
+
+    /// Saves the summary engine (and, for Ollama, its model) to the config file.
+    pub fn set_summary(&mut self, engine: SummaryEngine, ollama_model: Option<&str>) -> Result<()> {
+        edit(|doc| {
+            doc["summary_engine"] = toml_edit::value(if engine == SummaryEngine::Builtin { "builtin" } else { "ollama" });
+            if let Some(model) = ollama_model {
+                doc["ollama_model"] = toml_edit::value(model);
+            }
+        })?;
+        self.summary_engine = engine;
+        if let Some(model) = ollama_model {
+            self.ollama_model = model.to_string();
+        }
         Ok(())
     }
 
@@ -74,6 +100,15 @@ impl Config {
         };
         host == "localhost" || host == "::1" || host.starts_with("127.")
     }
+}
+
+/// Changes the config file in place, keeping its comments.
+fn edit(change: impl FnOnce(&mut toml_edit::DocumentMut)) -> Result<()> {
+    let path = config_path();
+    let mut doc: toml_edit::DocumentMut = fs::read_to_string(&path)?.parse()?;
+    change(&mut doc);
+    fs::write(&path, doc.to_string())?;
+    Ok(())
 }
 
 /// `$XDG_CONFIG_HOME/heylisten/config.toml`, defaulting to `~/.config` on every platform.
