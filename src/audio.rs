@@ -94,6 +94,19 @@ pub fn rms(samples: &[f32]) -> f32 {
     (samples.iter().map(|s| s * s).sum::<f32>() / samples.len().max(1) as f32).sqrt()
 }
 
+/// Where the quietest whole frame in `samples[from..to]` starts.
+pub fn quietest_frame(samples: &[f32], from: usize, to: usize) -> usize {
+    (from..to.saturating_sub(FRAME).max(from))
+        .step_by(FRAME)
+        .min_by(|a, b| rms(&samples[*a..*a + FRAME]).total_cmp(&rms(&samples[*b..*b + FRAME])))
+        .unwrap_or(from)
+}
+
+/// Seconds of the audio that are loud enough to be speech.
+pub fn speech_seconds(samples: &[f32]) -> f32 {
+    samples.chunks(FRAME).filter(|f| rms(f) > SPEECH_RMS).count() as f32 * FRAME as f32 / SAMPLE_RATE as f32
+}
+
 /// True if at least 0.3 s of the audio is loud enough to be speech. Whisper invents text
 /// from near-silence, so anything else isn't worth transcribing.
 pub fn has_speech(samples: &[f32]) -> bool {

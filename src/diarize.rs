@@ -4,8 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Result, anyhow};
-use sherpa_rs::diarize::{Diarize, DiarizeConfig};
+use anyhow::{Context, Result, bail};
 
 use crate::config::models_dir;
 use crate::transcript::{Segment, Who};
@@ -20,28 +19,66 @@ pub struct Turn {
     pub speaker: i32,
 }
 
+/// Threads for speaker recognition. It runs after the meeting, on the CPU.
+const THREADS: i32 = 4;
+
 /// Finds who speaks when in 16 kHz mono audio. The number of speakers is detected.
 pub fn diarize(samples: &[f32], debug: bool) -> Result<Vec<Turn>> {
-    let config = DiarizeConfig {
-        num_clusters: Some(-1), // detect the number of speakers
-        threshold: Some(0.5),
-        min_duration_on: Some(0.3),
-        min_duration_off: Some(0.5),
-        ..Default::default()
+    use sherpa_rs::sherpa_rs_sys as sys;
+    use std::ffi::CString;
+
+    let path = |p: PathBuf| CString::new(p.to_string_lossy().as_bytes()).context("bad model path");
+    let segmentation = path(model_file("segmentation.onnx", SEGMENTATION)?)?;
+    let embedding = path(model_file("embedding.onnx", EMBEDDING)?)?;
+    let provider = CString::new("cpu")?;
+    // sherpa-rs's own wrapper always uses one thread; this is the same setup with more.
+    let config = sys::SherpaOnnxOfflineSpeakerDiarizationConfig {
+        segmentation: sys::SherpaOnnxOfflineSpeakerSegmentationModelConfig {
+            pyannote: sys::SherpaOnnxOfflineSpeakerSegmentationPyannoteModelConfig { model: segmentation.as_ptr() },
+            num_threads: THREADS,
+            debug: 0,
+            provider: provider.as_ptr(),
+        },
+        embedding: sys::SherpaOnnxSpeakerEmbeddingExtractorConfig {
+            model: embedding.as_ptr(),
+            num_threads: THREADS,
+            debug: 0,
+            provider: provider.as_ptr(),
+        },
+        clustering: sys::SherpaOnnxFastClusteringConfig { num_clusters: -1, threshold: 0.5 }, // detect the speaker count
+        min_duration_on: 0.3,
+        min_duration_off: 0.5,
     };
-    let (segmentation, embedding) = (model_file("segmentation.onnx", SEGMENTATION)?, model_file("embedding.onnx", EMBEDDING)?);
-    // sherpa-rs reports errors as eyre::Report.
-    let mut d = Diarize::new(segmentation, embedding, config).map_err(|e| anyhow!("{e}"))?;
-    let turns = d.compute(samples.to_vec(), None).map_err(|e| anyhow!("{e}"))?;
-    if debug {
-        for t in &turns {
-            eprintln!("turn {:6.2}–{:6.2} speaker {}", t.start, t.end, t.speaker);
+
+    let mut turns = Vec::new();
+    unsafe {
+        let sd = sys::SherpaOnnxCreateOfflineSpeakerDiarization(&config);
+        if sd.is_null() {
+            bail!("couldn't load the speaker models");
+        }
+        let result = sys::SherpaOnnxOfflineSpeakerDiarizationProcess(sd, samples.as_ptr(), samples.len() as i32);
+        if !result.is_null() {
+            let n = sys::SherpaOnnxOfflineSpeakerDiarizationResultGetNumSegments(result);
+            let segments = sys::SherpaOnnxOfflineSpeakerDiarizationResultSortByStartTime(result);
+            if !segments.is_null() {
+                for t in std::slice::from_raw_parts(segments, n.max(0) as usize) {
+                    turns.push(Turn { start_ms: (t.start * 1000.0) as u64, end_ms: (t.end * 1000.0) as u64, speaker: t.speaker });
+                }
+                sys::SherpaOnnxOfflineSpeakerDiarizationDestroySegment(segments);
+            }
+            sys::SherpaOnnxOfflineSpeakerDiarizationDestroyResult(result);
+        }
+        sys::SherpaOnnxDestroyOfflineSpeakerDiarization(sd);
+        if result.is_null() {
+            bail!("speaker recognition failed");
         }
     }
-    Ok(turns
-        .into_iter()
-        .map(|t| Turn { start_ms: (t.start * 1000.0) as u64, end_ms: (t.end * 1000.0) as u64, speaker: t.speaker })
-        .collect())
+    if debug {
+        for t in &turns {
+            crate::recorder::log(&format!("turn {:.2}–{:.2} s: speaker {}", t.start_ms as f32 / 1000.0, t.end_ms as f32 / 1000.0, t.speaker));
+        }
+    }
+    Ok(turns)
 }
 
 /// Labels the Others (system track) as Speaker 1, 2, 3… in order of appearance.

@@ -91,7 +91,16 @@ impl Server {
         // Let the OS pick a free port, then hand it to llama-server.
         let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         let key = random_key()?;
-        let child = Command::new(server_path())
+        let mut command = Command::new(server_path());
+        // A summary may still be running when the next call starts: let the call go first.
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(|| {
+                libc::setpriority(libc::PRIO_PROCESS, 0, 10);
+                Ok(())
+            });
+        }
+        let child = command
             .arg("-m")
             .arg(model)
             .args(["--host", "127.0.0.1", "--port", &port.to_string(), "-c", &num_ctx.to_string(), "-ngl", "99", "--jinja"])

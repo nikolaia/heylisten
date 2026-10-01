@@ -170,7 +170,16 @@ nix develop -c scripts/bundle-macos.sh                  # → target/heyListen.a
 
 The build downloads sherpa-onnx and two small speaker-recognition models, which get embedded in the binary. Pushing a `v*` tag runs [the release workflow](.github/workflows/release.yml), which builds the app and attaches the zip to a GitHub Release.
 
-`HEYLISTEN_DEBUG=1 heylisten start` logs how much audio each track receives, and the speaker turns, to `recorder.log` in the meeting folder.
+**Debugging:** turn on *Debug mode (keep recordings)* in the menu, or set `debug = true` in the config, or run `HEYLISTEN_DEBUG=1 heylisten start`. This keeps every recording and logs the devices, audio errors, how much audio each track receives, and the speaker turns, to `recorder.log` in the meeting folder.
+
+**Long meetings:** `scripts/scale-test.sh` runs the whole pipeline on synthetic 2-, 4- and 8-minute meetings (a few minutes in total) and predicts what an hour will take. On a MacBook Pro M3 Pro:
+
+| For a 60-minute meeting | |
+|---|---|
+| Live transcription | keeps up at 5× real time |
+| After stop: speakers | ~4 min |
+| After stop: summary | ~30–60 s (one pass; meetings over ~2.5 h are summarized in parts) |
+| Peak memory | ~10 GB while summarizing (mostly the 7 GB summary model), ~1.6 GB while recording |
 
 ## 🗺️ Status
 

@@ -8,8 +8,10 @@ use crate::config::{Config, SummaryEngine, prompt_path};
 use crate::{engine, ollama};
 use crate::transcript::{Segment, Transcript};
 
-/// Bigger windows cost RAM and time without helping a meeting summary much.
+/// Bigger windows cost RAM and time without helping a meeting summary much. Longer
+/// transcripts are summarized in parts.
 const MAX_CTX: u64 = 32_768;
+const MIN_CTX: u64 = 8_192;
 /// Room left for the model's answer.
 const ANSWER_TOKENS: u64 = 2_048;
 /// Rough Norwegian token estimate. Errs on the safe side.
@@ -34,17 +36,23 @@ impl Writer<'_> {
 pub fn summarize(config: &Config, transcript: &Transcript, mut on_part: impl FnMut(usize, usize)) -> Result<String> {
     let path = prompt_path();
     let prompt = fs::read_to_string(&path).with_context(|| format!("can't read {}", path.display()))?;
+    // Only as much context as this transcript needs: memory for it is reserved up front, and
+    // a 32k window costs gigabytes a short meeting doesn't need.
+    let transcript_chars: usize = transcript.segments.iter().map(|s| s.text.len() + 16).sum();
+    let needed = (prompt.len() + transcript_chars) as u64 / CHARS_PER_TOKEN + ANSWER_TOKENS;
+    let wanted = needed.div_ceil(4_096) * 4_096;
     let (writer, num_ctx) = match config.summary_engine {
         SummaryEngine::Builtin => {
             let model = engine::borealis_path().context("the summary model isn't downloaded yet (run heylisten setup)")?;
-            (Writer::Builtin(engine::Server::start(&model, MAX_CTX)?), MAX_CTX)
+            let num_ctx = wanted.clamp(MIN_CTX, MAX_CTX);
+            (Writer::Builtin(engine::Server::start(&model, num_ctx)?), num_ctx)
         }
         SummaryEngine::Ollama => {
             let (url, model) = (config.ollama_url.as_str(), config.ollama_model.as_str());
             let num_ctx = ollama::context_length(url, model)
                 .with_context(|| format!("Ollama not reachable at {url}, or model {model} not pulled"))?
                 .unwrap_or(8_192)
-                .min(MAX_CTX);
+                .min(wanted.clamp(MIN_CTX, MAX_CTX));
             (Writer::Ollama { url, model }, num_ctx)
         }
     };

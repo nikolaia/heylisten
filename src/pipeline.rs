@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 
@@ -30,6 +31,8 @@ pub enum Event {
     SummaryFailed(String),
     NoteWritten(PathBuf),
     AudioDeleted,
+    /// How long a step took: "transcription", "speakers" or "summary".
+    Took(&'static str, Duration),
 }
 
 pub type OnEvent = Arc<dyn Fn(Event) + Send + Sync>;
@@ -70,6 +73,7 @@ pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, on_event: O
             );
         }
         on_event(Event::LoadingModel);
+        let started = Instant::now();
         let mut transcriber = Transcriber::load(&config.whisper_model)?;
         // Same as live: chunks cut at pauses keep timestamps (and so speakers) accurate.
         let mut segments = Vec::new();
@@ -81,15 +85,17 @@ pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, on_event: O
             for (i, chunk) in chunks.iter().enumerate() {
                 on_event(Event::Transcribing { track: *track, percent: (i * 100 / chunks.len()) as i32 });
                 let offset_ms = chunk.start_sample * 1000 / audio::SAMPLE_RATE as u64;
-                segments.push(transcriber.transcribe(&chunk.samples, offset_ms, track.who(), |_| {})?);
+                segments.push(transcriber.transcribe(&chunk.samples, offset_ms, track.who())?);
             }
             on_event(Event::Transcribing { track: *track, percent: 100 });
         }
+        on_event(Event::Took("transcription", started.elapsed()));
         Transcript::merge(segments)
     };
     // Tell speakers apart: the Others first, then any room full of people on the mic.
     let mut transcript = transcript;
     let mut others = 0;
+    let started = Instant::now();
     for track in [Track::System, Track::Mic] {
         let Some((_, samples)) = tracks.iter().find(|(t, _)| *t == track) else { continue };
         on_event(Event::Diarizing(track));
@@ -100,16 +106,19 @@ pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, on_event: O
         }
     }
     diarize::renumber(&mut transcript.segments);
+    on_event(Event::Took("speakers", started.elapsed()));
     fs::write(meeting.dir().join("transcript.json"), serde_json::to_string_pretty(&transcript)?)?;
 
     if config.summary_engine == SummaryEngine::Ollama && !config.ollama_is_local() {
         on_event(Event::SendingOffMachine(config.ollama_url.clone()));
     }
     on_event(Event::Summarizing { part: 1, parts: 1 });
+    let started = Instant::now();
     let summary = summarize::summarize(config, &transcript, |part, parts| on_event(Event::Summarizing { part, parts }))
         .map(|text| Summary { model: summarize::model_name(config).to_string(), text })
         .inspect_err(|e| on_event(Event::SummaryFailed(format!("{e:#}"))))
         .ok();
+    on_event(Event::Took("summary", started.elapsed()));
 
     let model_name = config.whisper_model.file_stem().and_then(|s| s.to_str()).unwrap_or("whisper");
     let contents = note::render(meeting, &transcript, model_name, summary.as_ref());

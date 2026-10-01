@@ -15,12 +15,24 @@ use crate::transcribe::Transcriber;
 use crate::transcript::Segment;
 
 const SECOND: usize = SAMPLE_RATE as usize;
-/// A pause this long ends a chunk...
-const PAUSE: usize = SECOND / 2;
-/// ...once the chunk is at least this long. Short, so a chunk rarely holds two speakers.
+/// A chunk ends at a pause once it's at least this long. Short, so a chunk rarely holds two
+/// speakers.
 const MIN_CHUNK: usize = SECOND;
-/// Cut here even without a pause, so text keeps flowing during monologues.
-const MAX_CHUNK: usize = SECOND * 25;
+/// Cut by here even without a pause. NB-Whisper skips whole sentences in longer chunks.
+const MAX_CHUNK: usize = SECOND * 12;
+/// How far back from MAX_CHUNK to look for the quietest moment to cut at.
+const CUT_WINDOW: usize = SECOND * 4;
+
+/// The pause that ends a chunk shrinks as the chunk grows: half a second while it's short
+/// (a real pause in conversation), down to a breath once it's long. Natural speech has those
+/// often, so the forced cut at MAX_CHUNK is rare.
+fn pause_needed(chunk_len: usize) -> usize {
+    match chunk_len {
+        n if n < SECOND * 5 => SECOND / 2,
+        n if n < SECOND * 9 => SECOND * 3 / 10,
+        _ => SECOND * 3 / 20,
+    }
+}
 
 pub struct Chunk {
     pub track: Track,
@@ -53,11 +65,15 @@ impl Chunker {
             self.analyzed += FRAME;
             self.quiet = if loud { 0 } else { self.quiet + FRAME };
 
-            if self.quiet == self.analyzed && self.quiet >= PAUSE {
+            if self.quiet == self.analyzed && self.quiet >= SECOND / 2 {
                 // Nothing but silence so far: throw it away.
                 self.cut(self.analyzed, false, out);
-            } else if (self.analyzed >= MIN_CHUNK && self.quiet >= PAUSE) || self.analyzed >= MAX_CHUNK {
+            } else if self.analyzed >= MIN_CHUNK && self.quiet >= pause_needed(self.analyzed) {
                 self.cut(self.analyzed, true, out);
+            } else if self.analyzed >= MAX_CHUNK {
+                // No pause at all: cut at the quietest moment near the end, usually between words.
+                let at = audio::quietest_frame(&self.buf, self.analyzed - CUT_WINDOW, self.analyzed) + FRAME;
+                self.cut(at, true, out);
             }
         }
     }
@@ -77,6 +93,7 @@ impl Chunker {
         }
         self.start += at as u64;
         self.analyzed -= at.min(self.analyzed);
+        // Whatever's left after the cut point is still unread speech or silence; count it again.
         self.quiet = 0;
     }
 }
@@ -91,10 +108,11 @@ pub fn spawn(model: PathBuf, meeting_dir: PathBuf) -> Result<(mpsc::Sender<Chunk
     let (tx, rx) = mpsc::channel::<Chunk>();
     let mut file = OpenOptions::new().create(true).append(true).open(live_path(&meeting_dir))?;
     let handle = thread::spawn(move || {
+        background_priority();
         let mut transcriber = Transcriber::load(&model)?;
         for chunk in rx {
             let offset_ms = chunk.start_sample * 1000 / SAMPLE_RATE as u64;
-            for segment in transcriber.transcribe(&chunk.samples, offset_ms, chunk.track.who(), |_| {})? {
+            for segment in transcriber.transcribe(&chunk.samples, offset_ms, chunk.track.who())? {
                 writeln!(file, "{}", serde_json::to_string(&segment)?)?;
             }
             file.flush()?;
@@ -102,6 +120,19 @@ pub fn spawn(model: PathBuf, meeting_dir: PathBuf) -> Result<(mpsc::Sender<Chunk
         Ok(())
     });
     Ok((tx, handle))
+}
+
+/// Live transcription runs during video calls: give it a lower priority than the call. Audio
+/// capture runs on its own real-time threads and isn't affected.
+fn background_priority() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
+    }
+    #[cfg(not(target_os = "macos"))]
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, 0, 10); // on Linux this affects only this thread
+    }
 }
 
 /// Reads the live transcript's segments, in the order they were written.
@@ -165,7 +196,23 @@ mod tests {
         let mut out = Vec::new();
         c.push(&tone(60.0), &mut out);
         c.finish(&mut out);
-        assert_eq!(out.len(), 3);
+        assert!(out.len() >= 5, "{} chunks", out.len());
         assert!(out.iter().all(|ch| ch.samples.len() <= MAX_CHUNK));
+        // Nothing lost: the chunks cover all 60 s.
+        assert_eq!(out.iter().map(|ch| ch.samples.len()).sum::<usize>(), 60 * SECOND);
+    }
+
+    #[test]
+    fn cuts_monologues_at_the_quietest_moment() {
+        // 11 s of speech, a 0.2 s dip (too short to count as a pause), then more speech.
+        let mut audio = tone(10.0);
+        audio.extend(silence(0.2));
+        audio.extend(tone(8.0));
+        let mut c = Chunker::new(Track::System);
+        let mut out = Vec::new();
+        c.push(&audio, &mut out);
+        c.finish(&mut out);
+        let first = out[0].samples.len() as f32 / SAMPLE_RATE as f32;
+        assert!((10.0..=10.25).contains(&first), "cut at {first} s");
     }
 }

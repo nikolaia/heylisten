@@ -71,8 +71,9 @@ struct Tray {
     /// What the Summary model submenu was last built from.
     summary_shown: Option<(SummaryEngine, String, Vec<String>)>,
     shown_icon: Look,
-    /// The orange dot's pulse, and which frame is showing.
-    pulse: Vec<Icon>,
+    /// The breathing animations, and which frame is showing.
+    busy: Vec<Icon>,
+    recording: Vec<Icon>,
     frame: usize,
     started: Instant,
     /// The text next to the icon (elapsed time while recording).
@@ -166,7 +167,8 @@ fn main() -> Result<()> {
                     summary_ids: HashMap::new(),
                     summary_shown: None,
                     shown_icon: Look::Idle,
-                    pulse: pulse_frames(),
+                    busy: breathing(BUSY_BREATH, FRAME, ([255, 205, 60], 0.55), ([245, 135, 25], 1.0)),
+                    recording: breathing(RECORDING_BREATH, SLOW_FRAME, ([230, 50, 50], 0.85), ([230, 50, 50], 1.0)),
                     frame: 0,
                     started: Instant::now(),
                     title: None,
@@ -257,9 +259,14 @@ fn main() -> Result<()> {
             && wake
         {
             t.refresh(&config);
-            if t.shown_icon == Look::Busy {
-                // Wake often enough to animate the pulse.
-                *control_flow = ControlFlow::WaitUntil(Instant::now() + PULSE_FRAME);
+            let frame = match t.shown_icon {
+                Look::Idle => None,
+                Look::Busy => Some(FRAME),
+                Look::Recording => Some(SLOW_FRAME),
+            };
+            if let Some(frame) = frame {
+                // Wake often enough to animate.
+                *control_flow = ControlFlow::WaitUntil(Instant::now() + frame);
             }
         }
     })
@@ -329,19 +336,24 @@ impl Tray {
             State::Starting | State::Busy(_) => Look::Busy,
             State::Idle => Look::Idle,
         };
-        if look == Look::Busy {
-            // The frame follows the clock, however often the event loop happens to run.
-            let frame = (self.started.elapsed().as_millis() / PULSE_FRAME.as_millis()) as usize % self.pulse.len();
-            if frame != self.frame || self.shown_icon != Look::Busy {
-                let _ = self.icon.set_icon(Some(self.pulse[frame].clone()));
-                self.frame = frame;
+        let frames = match look {
+            Look::Idle => None,
+            Look::Busy => Some((&self.busy, FRAME)),
+            Look::Recording => Some((&self.recording, SLOW_FRAME)),
+        };
+        match frames {
+            Some((frames, every)) => {
+                // The frame follows the clock, however often the event loop happens to run.
+                let frame = (self.started.elapsed().as_millis() / every.as_millis()) as usize % frames.len();
+                if frame != self.frame || look != self.shown_icon {
+                    let _ = self.icon.set_icon(Some(frames[frame].clone()));
+                    self.frame = frame;
+                }
             }
-        } else if look != self.shown_icon {
-            let _ = match look {
-                Look::Recording => self.icon.set_icon(Some(dot_icon([230, 50, 50]))),
-                Look::Idle => self.icon.set_icon_templated(Some(idle_icon())),
-                Look::Busy => unreachable!(),
-            };
+            None if look != self.shown_icon => {
+                let _ = self.icon.set_icon_templated(Some(idle_icon()));
+            }
+            None => {}
         }
         self.shown_icon = look;
     }
@@ -500,47 +512,53 @@ fn open(target: &Path) {
 }
 
 const SIZE: u32 = 44; // 22 pt menu bar icons, drawn at 2x
+/// The busy pulse runs at 24 frames a second; the faint recording pulse, which runs for the
+/// whole meeting, at 12 to keep it cheap. Every frame is drawn up front.
+const FRAME: Duration = Duration::from_millis(1000 / 24);
+const SLOW_FRAME: Duration = Duration::from_millis(1000 / 12);
+const BUSY_BREATH: Duration = Duration::from_millis(1600);
+const RECORDING_BREATH: Duration = Duration::from_millis(2400);
+const DOT_RADIUS: f32 = 0.6;
 
 /// A ring: black on transparent, used as a template so macOS tints it for light and dark menu bars.
 fn idle_icon() -> Icon {
-    draw(|d| (d > 0.55 && d < 0.78).then_some(([0, 0, 0], 255)))
+    draw(|d| {
+        let coverage = edge(d - 0.55).min(edge(0.78 - d));
+        ([0, 0, 0], coverage)
+    })
 }
 
-/// A filled dot in a colour.
-fn dot_icon(rgb: [u8; 3]) -> Icon {
-    draw(|d| (d < 0.62).then_some((rgb, 255)))
-}
-
-/// One breath of the orange "working" dot takes PULSE_FRAMES × PULSE_FRAME = 1.8 s.
-const PULSE_FRAME: Duration = Duration::from_millis(100);
-const PULSE_FRAMES: usize = 18;
-
-/// The orange "working" dot, breathing: it grows a little and fades, then comes back.
-fn pulse_frames() -> Vec<Icon> {
-    const FRAMES: usize = PULSE_FRAMES;
-    (0..FRAMES)
+/// A dot that eases from one colour and opacity to another and back, once per `breath`.
+fn breathing(breath: Duration, every: Duration, from: ([u8; 3], f32), to: ([u8; 3], f32)) -> Vec<Icon> {
+    let frames = (breath.as_millis() / every.as_millis()).max(1) as usize;
+    (0..frames)
         .map(|i| {
-            // 1 at the start of the cycle, 0 halfway.
-            let t = 0.5 + 0.5 * (i as f32 / FRAMES as f32 * std::f32::consts::TAU).cos();
-            let radius = 0.50 + 0.14 * t;
-            let alpha = (110.0 + 145.0 * t) as u8;
-            draw(move |d| (d < radius).then_some(([240, 160, 30], alpha)))
+            // 0 → 1 → 0, eased at both ends.
+            let t = 0.5 - 0.5 * (i as f32 / frames as f32 * std::f32::consts::TAU).cos();
+            let lerp = |a: f32, b: f32| a + (b - a) * t;
+            let rgb = [0, 1, 2].map(|c| lerp(from.0[c] as f32, to.0[c] as f32).round() as u8);
+            let alpha = lerp(from.1, to.1);
+            draw(move |d| (rgb, alpha * edge(DOT_RADIUS - d)))
         })
         .collect()
 }
 
+/// Anti-aliasing: how much of a pixel lies inside an edge, given its distance inside it
+/// (in units of the icon's radius).
+fn edge(inside: f32) -> f32 {
+    (inside * SIZE as f32 / 2.0 + 0.5).clamp(0.0, 1.0)
+}
+
 /// Draws a square icon from a function of the distance from the centre (0 at the centre, 1 at
-/// the edge) to a colour and opacity.
-fn draw(paint: impl Fn(f32) -> Option<([u8; 3], u8)>) -> Icon {
+/// the edge) to a colour and opacity (0 to 1).
+fn draw(paint: impl Fn(f32) -> ([u8; 3], f32)) -> Icon {
     let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
     let c = SIZE as f32 / 2.0;
     for y in 0..SIZE {
         for x in 0..SIZE {
             let d = ((x as f32 + 0.5 - c).powi(2) + (y as f32 + 0.5 - c).powi(2)).sqrt() / c;
-            match paint(d) {
-                Some(([r, g, b], a)) => rgba.extend([r, g, b, a]),
-                None => rgba.extend([0, 0, 0, 0]),
-            }
+            let ([r, g, b], a) = paint(d);
+            rgba.extend([r, g, b, (a.clamp(0.0, 1.0) * 255.0).round() as u8]);
         }
     }
     Icon::from_rgba(rgba, SIZE, SIZE).expect("valid icon")
