@@ -6,7 +6,7 @@ use chrono::{DateTime, Duration, Local};
 use serde::{Deserialize, Serialize};
 
 use crate::audio;
-use crate::config::meetings_dir;
+use crate::config::{AUDIO_KEPT_DAYS, meetings_dir};
 use crate::transcript::Who;
 
 /// One meeting and its folder: `<meetings_dir>/<id>/` holding `meeting.json`, track WAVs and `transcript.json`.
@@ -102,6 +102,12 @@ impl Meeting {
         meetings.into_iter().filter_map(|m| m.note).filter(|n| n.is_file()).take(limit).collect()
     }
 
+    /// Deletes the audio of meetings that ended more than `AUDIO_KEPT_DAYS` ago. Transcripts
+    /// and notes stay. Returns how many meetings had audio deleted.
+    pub fn prune_old_audio() -> usize {
+        prune_audio_in(&meetings_dir(), Local::now() - Duration::days(AUDIO_KEPT_DAYS))
+    }
+
     pub fn create(title: String, start: DateTime<Local>) -> Result<Meeting> {
         let base = start.format("%Y-%m-%d-%H%M%S").to_string();
         for n in 1..100 {
@@ -114,5 +120,50 @@ impl Meeting {
             }
         }
         bail!("too many meetings starting at {base}")
+    }
+}
+
+/// Deletes the track WAVs of every meeting in `dir` that ended before `cutoff`.
+fn prune_audio_in(dir: &Path, cutoff: DateTime<Local>) -> usize {
+    let Ok(entries) = fs::read_dir(dir) else { return 0 };
+    let mut pruned = 0;
+    for entry in entries.flatten() {
+        let Ok(text) = fs::read_to_string(entry.path().join("meeting.json")) else { continue };
+        let Ok(meeting) = serde_json::from_str::<Meeting>(&text) else { continue };
+        // A meeting that never got an end time (the recorder died) counts from its start.
+        if meeting.end.max(meeting.start) >= cutoff {
+            continue;
+        }
+        let mut deleted = false;
+        for track in Track::ALL {
+            deleted |= fs::remove_file(entry.path().join(track.file_name())).is_ok();
+        }
+        pruned += deleted as usize;
+    }
+    pruned
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prunes_only_audio_older_than_the_cutoff() {
+        let dir = std::env::temp_dir().join(format!("heylisten-prune-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let now = Local::now();
+        for (id, ended) in [("old", now - Duration::days(8)), ("new", now - Duration::days(2))] {
+            let m = dir.join(id);
+            fs::create_dir_all(&m).unwrap();
+            let meeting = Meeting { id: id.into(), title: id.into(), start: ended, end: ended, live_complete: true, note: None };
+            fs::write(m.join("meeting.json"), serde_json::to_string(&meeting).unwrap()).unwrap();
+            fs::write(m.join("mic.wav"), b"x").unwrap();
+            fs::write(m.join("transcript.json"), b"{}").unwrap();
+        }
+        assert_eq!(prune_audio_in(&dir, now - Duration::days(AUDIO_KEPT_DAYS)), 1);
+        assert!(!dir.join("old/mic.wav").exists());
+        assert!(dir.join("old/transcript.json").exists(), "transcripts stay");
+        assert!(dir.join("new/mic.wav").exists());
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

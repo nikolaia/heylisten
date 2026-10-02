@@ -16,8 +16,10 @@ summary_engine = "builtin"
 ollama_model = "hf.co/NbAiLab/borealis-12b-gguf"
 ollama_url = "http://localhost:11434"
 
-# Keep the recorded audio after the note is written.
+# Keep the recorded audio after the note is written, so a meeting can be redone with
+# `heylisten process <id>`. Kept audio is always deleted after 7 days.
 keep_audio = false
 
-# For testing: keep every recording and log details to recorder.log in the meeting folder.
-debug = false
+# Keep recordings (for 7 days, as above) and log details to recorder.log in the meeting
+# folder. On by default while heyListen is being tuned.
+debug = true

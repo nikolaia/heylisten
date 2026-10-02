@@ -195,6 +195,7 @@ pub fn spawn(exe: &Path, title: String) -> Result<Meeting> {
         Status::Died { meeting } => bail!("the recorder for '{}' died. Finish that meeting first: heylisten stop", meeting.title),
         Status::Idle => {}
     }
+    Meeting::prune_old_audio();
     let meeting = Meeting::create(title, Local::now())?;
     let log = meeting.dir().join("recorder.log");
     launch(exe, &meeting.id, &log)?;

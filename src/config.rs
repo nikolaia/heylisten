@@ -19,11 +19,16 @@ pub struct Config {
     pub summary_engine: SummaryEngine,
     pub ollama_model: String,
     pub ollama_url: String,
+    /// Keep a meeting's audio after its note is written, for at most `AUDIO_KEPT_DAYS`.
     pub keep_audio: bool,
-    /// For testing: keeps every recording and logs details to each meeting's recorder.log.
-    /// HEYLISTEN_DEBUG=1 turns it on too.
+    /// Keeps recordings (like `keep_audio`) and logs details to each meeting's recorder.log.
+    /// On by default while heyListen is being tuned. HEYLISTEN_DEBUG=1 turns it on too.
     pub debug: bool,
 }
+
+/// Kept audio is deleted after this many days, whatever the settings: it's only there to
+/// redo a note, never to keep recordings around.
+pub const AUDIO_KEPT_DAYS: i64 = 7;
 
 impl Default for Config {
     fn default() -> Config {
@@ -34,7 +39,7 @@ impl Default for Config {
             ollama_model: "hf.co/NbAiLab/borealis-12b-gguf".into(),
             ollama_url: "http://localhost:11434".into(),
             keep_audio: false,
-            debug: false,
+            debug: true,
         }
     }
 }

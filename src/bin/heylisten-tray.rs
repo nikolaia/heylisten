@@ -121,7 +121,7 @@ fn main() -> Result<()> {
         recent: Submenu::new("Recent notes", false),
         summary: Submenu::new("Summary model", true),
         notes_dir: MenuItem::new("Set notes location…", true, None),
-        debug: CheckMenuItem::new("Debug mode (keep recordings)", true, config.debug, None),
+        debug: CheckMenuItem::new("Debug mode (keep recordings 7 days)", true, config.debug, None),
         quit: MenuItem::new("Quit heyListen", true, None),
     };
     let menu = Menu::new();
@@ -434,7 +434,13 @@ fn ollama_matches(listed: &str, configured: &str) -> bool {
 /// Reads the config each time, so changes from the menu or the CLI show up.
 fn spawn_checker(proxy: EventLoopProxy<UserEvent>) {
     thread::spawn(move || {
+        let mut last_prune: Option<Instant> = None;
         loop {
+            // Kept audio is deleted after 7 days, even if heyListen is never used to record.
+            if last_prune.is_none_or(|t| t.elapsed() > Duration::from_secs(3600)) {
+                Meeting::prune_old_audio();
+                last_prune = Some(Instant::now());
+            }
             let Ok(config) = Config::load() else {
                 thread::sleep(Duration::from_secs(5));
                 continue;

@@ -73,7 +73,7 @@ pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, on_event: O
     } else {
         if tracks.is_empty() {
             bail!(
-                "meeting {} has no audio in {} (audio is deleted after the note is written unless keep_audio = true)",
+                "meeting {} has no audio in {} (audio is deleted after the note is written, or after 7 days with keep_audio or debug)",
                 meeting.id,
                 meeting.dir().display()
             );
@@ -148,6 +148,8 @@ pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, on_event: O
     done.save()?;
     on_event(Event::NoteWritten(note_path.clone()));
 
+    // Kept audio (keep_audio, debug, or a failed summary to retry) goes after AUDIO_KEPT_DAYS.
+    Meeting::prune_old_audio();
     if !config.keep_audio && !config.debug && summary.is_some() {
         for track in Track::ALL {
             let _ = fs::remove_file(meeting.track_path(track));

@@ -103,7 +103,8 @@ notes_dir = "~/Desktop"                             # where notes go (the tray c
 summary_engine = "builtin"                          # or "ollama" (the tray can set this)
 ollama_model = "hf.co/NbAiLab/borealis-12b-gguf"    # used with summary_engine = "ollama"
 ollama_url = "http://localhost:11434"               # keep it local
-keep_audio = false                                  # delete the audio once the note is written
+keep_audio = false                                  # keep audio after the note (deleted after 7 days)
+debug = true                                        # keep audio 7 days + detailed recorder.log (default while tuning)
 ```
 
 The summary prompt is `~/.config/heylisten/summary-prompt.md`. Edit it to change what the summary looks like.
@@ -175,7 +176,7 @@ nix develop -c scripts/bundle-macos.sh                  # → target/heyListen.a
 
 The build downloads sherpa-onnx and two small speaker-recognition models, which get embedded in the binary. Pushing a `v*` tag runs [the release workflow](.github/workflows/release.yml), which builds the app and attaches the zip to a GitHub Release.
 
-**Debugging:** turn on *Debug mode (keep recordings)* in the menu, or set `debug = true` in the config, or run `HEYLISTEN_DEBUG=1 heylisten start`. This keeps every recording and logs the devices, audio errors, how much audio each track receives, and the speaker turns, to `recorder.log` in the meeting folder.
+**Debugging:** *Debug mode (keep recordings 7 days)* is on by default while heyListen is being tuned. Turn it off in the menu, or with `debug = false` in the config. It keeps each meeting's audio so `heylisten process <id>` can redo the note, and logs the devices, audio errors, how much audio each track receives, and the speaker turns to `recorder.log` in the meeting folder. **Kept audio is always deleted after 7 days**, whatever the settings; transcripts and notes stay.
 
 **Long meetings:** `scripts/scale-test.sh` runs the whole pipeline on synthetic 2-, 4- and 8-minute meetings (a few minutes in total) and predicts what an hour will take. On a MacBook Pro M3 Pro:
 
