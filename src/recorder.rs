@@ -1,11 +1,12 @@
 //! The Recorder: captures a meeting's tracks to disk. It runs as its own background process
 //! (see docs/adr/0003); this module also starts, stops and finds that process.
 
+use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -13,6 +14,7 @@ use anyhow::{Context, Result, bail};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 
+use crate::aec::Aec;
 use crate::audio::{self, To16k, WavWriter};
 use crate::capture::{Mic, System};
 use crate::config::{Config, meetings_dir};
@@ -31,8 +33,20 @@ impl Recorder {
     /// `debug` logs how much audio each track receives, every second.
     pub fn start(meeting: &Meeting, whisper_model: &Path, debug: bool) -> Result<Recorder> {
         let (live_tx, live) = live::spawn(whisper_model.to_path_buf(), meeting.dir())?;
-        let (mic_tx, mic_writer) = track_writer(meeting, Track::Mic, live_tx.clone(), debug)?;
-        let (sys_tx, sys_writer) = track_writer(meeting, Track::System, live_tx, debug)?;
+        // The system track is the echo reference for the mic.
+        let loopback = Arc::new(Mutex::new(Loopback::default()));
+        let echo = match Aec::new() {
+            Ok(aec) => {
+                log("echo cancellation: on (DTLN-aec)");
+                Echo::Cancel { aec: Box::new(aec), loopback: loopback.clone(), pending: Vec::new(), next: 0 }
+            }
+            Err(e) => {
+                log(&format!("echo cancellation: off ({e:#})"));
+                Echo::Off
+            }
+        };
+        let (mic_tx, mic_writer) = track_writer(meeting, Track::Mic, live_tx.clone(), echo, debug)?;
+        let (sys_tx, sys_writer) = track_writer(meeting, Track::System, live_tx, Echo::Reference(loopback), debug)?;
         let mic = Mic::start(Box::new(move |s, rate| drop(mic_tx.send((s.to_vec(), rate)))))?;
         let system = System::start(Box::new(move |s, rate| drop(sys_tx.send((s.to_vec(), rate)))))?;
         // Always logged, so a bad recording can be traced to the device it came from.
@@ -63,32 +77,131 @@ impl Recorder {
 
 type Audio = (Vec<f32>, u32);
 
+/// The system track's recent 16 kHz audio, by absolute sample index: what the mic may hear
+/// back from the speakers.
+#[derive(Default)]
+struct Loopback {
+    start: u64,
+    samples: VecDeque<f32>,
+}
+
+impl Loopback {
+    /// How much of the reference to keep for a lagging mic.
+    const KEEP: usize = audio::SAMPLE_RATE as usize * 30;
+
+    fn push(&mut self, samples: &[f32]) {
+        self.samples.extend(samples);
+        let excess = self.samples.len().saturating_sub(Self::KEEP);
+        self.samples.drain(..excess);
+        self.start += excess as u64;
+    }
+
+    fn end(&self) -> u64 {
+        self.start + self.samples.len() as u64
+    }
+
+    /// Samples `[from, from + n)`, with silence for anything not (or no longer) here.
+    fn take(&self, from: u64, n: usize) -> Vec<f32> {
+        (from..from + n as u64)
+            .map(|i| if i >= self.start { self.samples.get((i - self.start) as usize).copied().unwrap_or(0.0) } else { 0.0 })
+            .collect()
+    }
+}
+
+/// What a track does with its finished audio besides writing it.
+enum Echo {
+    /// The system track: it's the reference the mic is cleaned against.
+    Reference(Arc<Mutex<Loopback>>),
+    /// The mic: cancel the reference out of it first. `pending` is mic audio from sample `next`
+    /// on, waiting for the reference to catch up.
+    Cancel { aec: Box<Aec>, loopback: Arc<Mutex<Loopback>>, pending: Vec<f32>, next: u64 },
+    Off,
+}
+
+/// The mic waits at most this long for the reference, then goes on with silence as reference
+/// (nothing played, or the system tap is late).
+const ECHO_WAIT: usize = audio::SAMPLE_RATE as usize / 2;
+
+/// Where a track's 16 kHz audio goes: echo handling, then the WAV file and the live transcript.
+struct Output {
+    wav: WavWriter,
+    chunker: Chunker,
+    live: mpsc::Sender<live::Chunk>,
+    echo: Echo,
+}
+
+impl Output {
+    fn put(&mut self, samples: &[f32]) -> Result<()> {
+        let clean = match &mut self.echo {
+            Echo::Reference(loopback) => {
+                loopback.lock().unwrap().push(samples);
+                return self.write(samples);
+            }
+            Echo::Off => return self.write(samples),
+            Echo::Cancel { aec, loopback, pending, next } => {
+                pending.extend_from_slice(samples);
+                let (ready, reference) = {
+                    let loopback = loopback.lock().unwrap();
+                    let available = loopback.end().saturating_sub(*next) as usize;
+                    let ready = available.min(pending.len()).max(pending.len().saturating_sub(ECHO_WAIT));
+                    (ready, loopback.take(*next, ready))
+                };
+                let mut clean = Vec::new();
+                aec.process(&pending[..ready], &reference, &mut clean)?;
+                pending.drain(..ready);
+                *next += ready as u64;
+                clean
+            }
+        };
+        self.write(&clean)
+    }
+
+    /// Flushes everything still held back, with silence as the reference beyond what there is.
+    fn finish(mut self) -> Result<()> {
+        if let Echo::Cancel { aec, loopback, pending, next } = &mut self.echo {
+            let reference = loopback.lock().unwrap().take(*next, pending.len());
+            let mut clean = Vec::new();
+            aec.process(pending, &reference, &mut clean)?;
+            aec.finish(&mut clean)?;
+            pending.clear();
+            self.write(&clean)?;
+        }
+        let mut chunks = Vec::new();
+        self.chunker.finish(&mut chunks);
+        for chunk in chunks {
+            let _ = self.live.send(chunk);
+        }
+        self.wav.finish()?;
+        Ok(())
+    }
+
+    fn write(&mut self, samples: &[f32]) -> Result<()> {
+        self.wav.write(samples)?;
+        let mut chunks = Vec::new();
+        self.chunker.push(samples, &mut chunks);
+        // A dead transcriber just means no live transcript.
+        for chunk in chunks {
+            let _ = self.live.send(chunk);
+        }
+        Ok(())
+    }
+}
+
 /// A thread that resamples one track to 16 kHz and streams it into its WAV file.
 fn track_writer(
     meeting: &Meeting,
     track: Track,
     live: mpsc::Sender<live::Chunk>,
+    echo: Echo,
     debug: bool,
 ) -> Result<(mpsc::Sender<Audio>, JoinHandle<Result<()>>)> {
     let (tx, rx) = mpsc::channel::<Audio>();
-    let mut wav = WavWriter::create(&meeting.track_path(track))?;
+    let mut output = Output { wav: WavWriter::create(&meeting.track_path(track))?, chunker: Chunker::new(track), live, echo };
     let start = meeting.start;
     let handle = thread::spawn(move || {
         let mut resampler: Option<(To16k, u32)> = None;
-        let mut chunker = Chunker::new(track);
-        let mut chunks = Vec::new();
         let mut out = Vec::new();
         let mut last_flush = Instant::now();
-        // Sends out finished chunks. A dead transcriber just means no live transcript.
-        let mut feed = |samples: &[f32], chunker: &mut Chunker, last: bool| {
-            chunker.push(samples, &mut chunks);
-            if last {
-                chunker.finish(&mut chunks);
-            }
-            for chunk in chunks.drain(..) {
-                let _ = live.send(chunk);
-            }
-        };
         let t0 = Instant::now();
         let (mut got, mut last_log) = (0usize, Instant::now());
         // 16 kHz samples written so far, silence included.
@@ -107,8 +220,7 @@ fn track_writer(
                 log(&format!("{:?}: sample rate changed from {old} Hz to {rate} Hz", track));
                 out.clear();
                 rs.finish(&mut out)?;
-                wav.write(&out)?;
-                feed(&out, &mut chunker, false);
+                output.put(&out)?;
                 written += out.len() as u64;
                 resampler = Some((To16k::new(rate)?, rate));
             }
@@ -128,27 +240,22 @@ fn track_writer(
                 if debug {
                     log(&format!("{:?}: {:.1} s without audio, filled with silence", track, gap as f32 / audio::SAMPLE_RATE as f32));
                 }
-                let silence = vec![0.0; gap as usize];
-                wav.write(&silence)?;
-                feed(&silence, &mut chunker, false);
+                output.put(&vec![0.0; gap as usize])?;
                 written += gap;
             }
-            wav.write(&out)?;
-            feed(&out, &mut chunker, false);
+            output.put(&out)?;
             written += out.len() as u64;
             if last_flush.elapsed() > Duration::from_secs(1) {
-                wav.flush()?;
+                output.wav.flush()?;
                 last_flush = Instant::now();
             }
         }
         if let Some((rs, _)) = &mut resampler {
             out.clear();
             rs.finish(&mut out)?;
-            wav.write(&out)?;
+            output.put(&out)?;
         }
-        feed(&out, &mut chunker, true);
-        wav.finish()?;
-        Ok(())
+        output.finish()
     });
     Ok((tx, handle))
 }

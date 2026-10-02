@@ -1,5 +1,6 @@
 //! heyListen: local-only meeting transcription. See CONTEXT.md for the vocabulary.
 
+pub mod aec;
 pub mod audio;
 pub mod capture;
 pub mod config;

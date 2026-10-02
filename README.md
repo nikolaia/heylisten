@@ -50,7 +50,7 @@ Hei og velkommen, skal vi starte med budsjettet?
 - 🎙️ **Mic and system audio** recorded as two separate tracks. System audio is captured directly by macOS, so there's no BlackHole or virtual driver.
 - ⚡ **Live transcript** with [NB-Whisper](https://huggingface.co/NbAiLab/nb-whisper-large), the National Library of Norway's Whisper. By the time you stop, the transcript is already done.
 - 🗣️ **Tells speakers apart**, both remote people and several people sharing one mic in a meeting room.
-- 🔁 **Echo removal**, so not wearing headphones doesn't put every line in the note twice.
+- 🔁 **Echo cancellation** ([DTLN-aec](https://github.com/breizhn/DTLN-aec)): what your speakers play is subtracted from your mic, so the others' voices and music don't become your lines, even without headphones.
 - 📝 **Norwegian summary** from [Borealis](https://huggingface.co/NbAiLab/borealis-12b-gguf), run by heyListen itself through llama.cpp, with no extra install. If you use [Ollama](https://ollama.com), you can pick any of its models instead. You get a summary, decisions, `- [ ]` tasks and topics, and the prompt is a file you can edit.
 - 📄 **Plain Markdown notes** with YAML frontmatter, so they work as-is in any notes app that reads Markdown.
 - 💾 **Crash-safe.** Audio streams to disk as it's recorded, so a crash or a closed terminal keeps everything recorded so far.
@@ -125,6 +125,7 @@ flowchart LR
 ```
 
 - **Two tracks.** The mic is you (`Meg`) and system audio is everyone else (`Andre`), so the live view can tell them apart from the start.
+- **Echo.** Without headphones the mic hears the others through the speakers. The recorder cancels the system track out of the mic, sample-aligned, before anything is written or transcribed (about 2 % of one CPU core). Mic lines that still repeat what the system track said are dropped from the note too.
 - **Live.** Each track is cut into chunks at pauses and transcribed as you talk. After stop, only speaker labelling and the summary are left.
 - **Speakers.** After stop, voices on both tracks are told apart and numbered `Taler 1`, `Taler 2`… in order of first appearance. If the mic hears only one voice, it stays `Meg`. In a meeting room where several people share a mic, every voice becomes a `Taler`, because heyListen can't know which one is you.
 - **Names.** When the meeting makes it clear who someone is, `Taler 2` becomes `Kari`. That means they introduce themselves ("dette er Kari"), or answer right after being addressed ("Kari, kan du…?"), or are thanked right after speaking ("Takk, Kari"). Code finds these and works out who is who; Borealis only confirms which words are names. Anything ambiguous stays `Taler N`. Each name is listed in the note's frontmatter with the label it replaced and the sentence it came from, so a wrong name is easy to fix by hand or by asking an LLM to replace it throughout. Names are found per meeting only, and nothing about anyone's voice is kept.
@@ -192,7 +193,7 @@ The build downloads sherpa-onnx and two small speaker-recognition models, which 
 | | |
 |---|---|
 | Menu bar app with first-run setup, recent notes, notes location | ✅ macOS |
-| Mic + system audio, live transcript, echo removal | ✅ macOS |
+| Mic + system audio, live transcript, echo cancellation | ✅ macOS |
 | Speakers, including several people on one mic | ✅ |
 | Norwegian summary, built in (llama.cpp) or via Ollama | ✅ (built-in engine: Apple Silicon only so far) |
 | Linux (PipeWire recording, tray via AppIndicator) | 🚧 not implemented or tested yet |
@@ -203,9 +204,14 @@ The build downloads sherpa-onnx and two small speaker-recognition models, which 
 - [NB-Whisper](https://huggingface.co/NbAiLab/nb-whisper-large) and [Borealis](https://huggingface.co/NbAiLab/borealis-12b-gguf) from the National Library of Norway.
 - [whisper.cpp](https://github.com/ggml-org/whisper.cpp) via [whisper-rs](https://crates.io/crates/whisper-rs).
 - [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) via [sherpa-rs](https://github.com/thewh1teagle/sherpa-rs), with [pyannote segmentation 3.0](https://huggingface.co/pyannote/segmentation-3.0) (MIT) and [3D-Speaker CAM++](https://github.com/modelscope/3D-Speaker) (Apache-2.0).
+- Echo cancellation: [DTLN-aec](https://github.com/breizhn/DTLN-aec) by Nils L. Westhausen and Bernd T. Meyer (MIT), with processing adapted from [Anarlog](https://github.com/fastrepl/anarlog)'s `crates/aec` by Fastrepl (MIT), run with [tract](https://github.com/sonos/tract). Full notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 - [llama.cpp](https://github.com/ggml-org/llama.cpp), [tray-icon](https://github.com/tauri-apps/tray-icon), [rfd](https://github.com/PolyMeilex/rfd) and [Ollama](https://ollama.com).
 - Ideas from [vaqlo](https://github.com/ivshestakov/vaqlo.app).
 
+## Contributing
+
+Bug reports and ideas are welcome; pull requests aren't accepted. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). Third-party notices: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -1,5 +1,5 @@
-//! Fetches the diarization models at build time so they can be embedded in the binary.
-//! heyListen itself never downloads anything (see docs/adr/0002).
+//! Fetches the speaker-recognition and echo-cancellation models at build time, so they can be
+//! embedded in the binary. Each is pinned to a SHA-256.
 
 use std::path::Path;
 use std::process::Command;
@@ -28,6 +28,19 @@ fn main() {
             &embedding,
         );
         assert!(verified(&embedding, "aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2"));
+    }
+    // DTLN-aec echo cancellation, 128 units (MIT, Nils L. Westhausen), as ONNX from Anarlog
+    // (MIT, Fastrepl), pinned to a commit.
+    const ANARLOG: &str = "https://raw.githubusercontent.com/fastrepl/anarlog/4d6187bb3559262d8fb650c5b4f5810171247396/crates/aec/data/models";
+    for (name, sha256) in [
+        ("model_128_1.onnx", "a060e46a6bebed03d6360262d814851dc6c2806cec7c1b6a388e617cae7c082c"),
+        ("model_128_2.onnx", "6b6e312f701a3fad2aac2981ca1ed978d25dffa0bc8da9f33235a2e91f56705a"),
+    ] {
+        let path = out.join(format!("aec_{name}"));
+        if !verified(&path, sha256) {
+            download(&format!("{ANARLOG}/{name}"), &path);
+            assert!(verified(&path, sha256), "{name} has the wrong checksum");
+        }
     }
     println!("cargo:rerun-if-changed=build.rs");
 }
