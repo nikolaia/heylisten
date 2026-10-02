@@ -38,7 +38,7 @@ impl Recorder {
         let echo = match Aec::new() {
             Ok(aec) => {
                 log("echo cancellation: on (DTLN-aec)");
-                Echo::Cancel { aec: Box::new(aec), loopback: loopback.clone(), pending: Vec::new(), next: 0 }
+                Echo::Cancel { aec: Box::new(aec), loopback: loopback.clone(), pending: Vec::new(), next: 0, levels: Levels::new(debug) }
             }
             Err(e) => {
                 log(&format!("echo cancellation: off ({e:#})"));
@@ -47,7 +47,7 @@ impl Recorder {
         };
         let (mic_tx, mic_writer) = track_writer(meeting, Track::Mic, live_tx.clone(), echo, debug)?;
         let (sys_tx, sys_writer) = track_writer(meeting, Track::System, live_tx, Echo::Reference(loopback), debug)?;
-        let mic = Mic::start(Box::new(move |s, rate| drop(mic_tx.send((s.to_vec(), rate)))))?;
+        let mic = Mic::start(Box::new(move |s, rate| drop(mic_tx.send((s.to_vec(), rate)))), debug)?;
         let system = System::start(Box::new(move |s, rate| drop(sys_tx.send((s.to_vec(), rate)))))?;
         // Always logged, so a bad recording can be traced to the device it came from.
         log(&format!("mic: {} ({} Hz, {} ch)", mic.device, mic.rate, mic.channels));
@@ -114,8 +114,43 @@ enum Echo {
     Reference(Arc<Mutex<Loopback>>),
     /// The mic: cancel the reference out of it first. `pending` is mic audio from sample `next`
     /// on, waiting for the reference to catch up.
-    Cancel { aec: Box<Aec>, loopback: Arc<Mutex<Loopback>>, pending: Vec<f32>, next: u64 },
+    Cancel { aec: Box<Aec>, loopback: Arc<Mutex<Loopback>>, pending: Vec<f32>, next: u64, levels: Levels },
     Off,
+}
+
+/// In debug mode: the mic's level before and after echo cancellation, and the reference's,
+/// logged every 5 s, to see what the cancellation removes.
+struct Levels {
+    on: bool,
+    sums: [f64; 3],
+    n: usize,
+}
+
+impl Levels {
+    fn new(on: bool) -> Levels {
+        Levels { on, sums: [0.0; 3], n: 0 }
+    }
+
+    fn add(&mut self, mic: &[f32], reference: &[f32], clean: &[f32]) {
+        if !self.on {
+            return;
+        }
+        for (sum, s) in self.sums.iter_mut().zip([mic, reference, clean]) {
+            *sum += s.iter().map(|x| (*x as f64).powi(2)).sum::<f64>();
+        }
+        self.n += mic.len();
+        if self.n >= audio::SAMPLE_RATE as usize * 5 {
+            let db = |sum: f64| 10.0 * (sum / self.n as f64).max(1e-12).log10();
+            log(&format!(
+                "echo cancellation over 5 s (dBFS RMS): mic {:.0} → {:.0} after, speakers {:.0}",
+                db(self.sums[0]),
+                db(self.sums[2]),
+                db(self.sums[1])
+            ));
+            self.sums = [0.0; 3];
+            self.n = 0;
+        }
+    }
 }
 
 /// The mic waits at most this long for the reference, then goes on with silence as reference
@@ -138,7 +173,7 @@ impl Output {
                 return self.write(samples);
             }
             Echo::Off => return self.write(samples),
-            Echo::Cancel { aec, loopback, pending, next } => {
+            Echo::Cancel { aec, loopback, pending, next, levels } => {
                 pending.extend_from_slice(samples);
                 let (ready, reference) = {
                     let loopback = loopback.lock().unwrap();
@@ -148,6 +183,7 @@ impl Output {
                 };
                 let mut clean = Vec::new();
                 aec.process(&pending[..ready], &reference, &mut clean)?;
+                levels.add(&pending[..ready], &reference, &clean);
                 pending.drain(..ready);
                 *next += ready as u64;
                 clean
@@ -158,7 +194,7 @@ impl Output {
 
     /// Flushes everything still held back, with silence as the reference beyond what there is.
     fn finish(mut self) -> Result<()> {
-        if let Echo::Cancel { aec, loopback, pending, next } = &mut self.echo {
+        if let Echo::Cancel { aec, loopback, pending, next, .. } = &mut self.echo {
             let reference = loopback.lock().unwrap().take(*next, pending.len());
             let mut clean = Vec::new();
             aec.process(pending, &reference, &mut clean)?;
