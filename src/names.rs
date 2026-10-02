@@ -60,7 +60,8 @@ fn people(reply: &str) -> BTreeSet<String> {
 
 /// Every place the transcript shows a speaker's name:
 /// - an introduction in their own words: "dette er Kari", "jeg heter Kari", "Kari her"
-/// - being addressed: a sentence starting "Kari, …" names the next speaker
+/// - being addressed: a sentence starting "Kari, …" names the next speaker, if it's among the
+///   last of what someone said (a name in the middle of a story is someone in the story)
 /// - being thanked: "Takk, Kari" names the previous speaker
 fn candidates(paragraphs: &[Paragraph]) -> Vec<Candidate> {
     let speaker = |who: Option<Who>| match who {
@@ -72,7 +73,9 @@ fn candidates(paragraphs: &[Paragraph]) -> Vec<Candidate> {
         let own = speaker(Some(p.who));
         let next = speaker(paragraphs.get(i + 1).map(|q| q.who)).filter(|n| Some(*n) != own);
         let previous = speaker(i.checked_sub(1).map(|j| paragraphs[j].who)).filter(|n| Some(*n) != own);
-        for sentence in p.text.split(['.', '?', '!']).map(str::trim).filter(|s| !s.is_empty()) {
+        let sentences: Vec<&str> = p.text.split(['.', '?', '!']).map(str::trim).filter(|s| !s.is_empty()).collect();
+        for (k, sentence) in sentences.iter().enumerate() {
+            let near_the_end = k + ADDRESS_SENTENCES >= sentences.len();
             let tokens: Vec<&str> = sentence.split_whitespace().collect();
             let words: Vec<String> = tokens.iter().map(|t| t.trim_matches(|c: char| !c.is_alphabetic()).to_string()).collect();
             let lower: Vec<String> = words.iter().map(|w| w.to_lowercase()).collect();
@@ -97,8 +100,8 @@ fn candidates(paragraphs: &[Paragraph]) -> Vec<Candidate> {
             if lower.len() >= 2 && lower[1] == "her" {
                 found(own, &words[0]);
             }
-            // Addressed: "X, …" at the start of the sentence.
-            if tokens.first().is_some_and(|t| t.ends_with(',')) {
+            // Addressed: "X, …" at the start of the sentence, but not "X, som …" (describing X).
+            if near_the_end && tokens.first().is_some_and(|t| t.ends_with(',')) && lower.get(1).is_none_or(|w| w != "som") {
                 found(next, &words[0]);
             }
             // Thanked: "takk, X" / "takk X".
@@ -111,6 +114,9 @@ fn candidates(paragraphs: &[Paragraph]) -> Vec<Candidate> {
     }
     out
 }
+
+/// An address names the next speaker only within this many sentences of the end.
+const ADDRESS_SENTENCES: usize = 2;
 
 /// Capitalized, a word, and not one of the usual sentence starters.
 fn could_be_a_name(word: &str) -> bool {
@@ -204,5 +210,21 @@ mod tests {
     fn reads_the_models_answer() {
         assert_eq!(people(r#"{"navn": ["Kari", " Ola "]}"#), confirmed(&["Kari", "Ola"]));
         assert!(people("Kari og Ola").is_empty());
+    }
+
+    #[test]
+    fn a_name_in_the_middle_of_a_story_is_not_an_address() {
+        let lines = [
+            (1, "Har du en historie?"),
+            (2, "Ja. Vi var på butikken i går. Per, som jobber der, sa at det var stengt. Så vi gikk videre. Og så dro vi hjem."),
+            (1, "Takk for det."),
+        ];
+        let segments = lines
+            .iter()
+            .enumerate()
+            .map(|(i, (n, text))| Segment { start_ms: i as u64 * 1000, end_ms: i as u64 * 1000 + 900, who: Who::Speaker(*n), text: text.to_string(), words: Vec::new() })
+            .collect();
+        let paragraphs = Transcript { segments, ..Default::default() }.paragraphs();
+        assert!(candidates(&paragraphs).is_empty());
     }
 }
