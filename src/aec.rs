@@ -165,6 +165,46 @@ fn run(plan: &Plan, inputs: [(&[usize], &[f32]); 3]) -> Result<(Vec<f32>, Vec<f3
     Ok((first, second))
 }
 
+/// How far the reference (what the speakers played) lags behind the echo it causes in the mic,
+/// in samples: positive means the reference is late. The system-audio tap delivers its audio
+/// later than the mic, so the tracks don't line up by arrival time alone.
+///
+/// Compares the loudness envelopes (1 ms resolution) of `mic` with `reference`, which must start
+/// `DELAY_MIN` before the mic window and run `DELAY_MAX` past it. Returns None unless the match
+/// is clear, so silence or unrelated sound never moves the estimate.
+pub fn estimate_delay(mic: &[f32], reference: &[f32]) -> Option<i64> {
+    const STEP: usize = 16; // 1 ms at 16 kHz
+    let envelope = |s: &[f32]| -> Vec<f32> { s.chunks(STEP).map(|c| c.iter().map(|x| x.abs()).sum()).collect() };
+    let centred = |mut e: Vec<f32>| {
+        let mean = e.iter().sum::<f32>() / e.len().max(1) as f32;
+        e.iter_mut().for_each(|x| *x -= mean);
+        e
+    };
+    let (m, r) = (centred(envelope(mic)), centred(envelope(reference)));
+    let (before, after) = (DELAY_MIN / STEP, DELAY_MAX / STEP);
+    if r.len() < m.len() + before + after || m.is_empty() {
+        return None;
+    }
+    let m_norm = m.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let mut best = (f32::MIN, 0i64);
+    for lag in 0..=(before + after) {
+        let window = &r[lag..lag + m.len()];
+        let r_norm = window.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if m_norm == 0.0 || r_norm == 0.0 {
+            continue;
+        }
+        let corr = m.iter().zip(window).map(|(a, b)| a * b).sum::<f32>() / (m_norm * r_norm);
+        if corr > best.0 {
+            best = (corr, lag as i64 - before as i64);
+        }
+    }
+    (best.0 > 0.6).then_some(best.1 * STEP as i64)
+}
+
+/// The range of delays `estimate_delay` considers, in samples.
+pub const DELAY_MIN: usize = 16_000 / 10; // the reference 100 ms early
+pub const DELAY_MAX: usize = 16_000 * 8 / 10; // the reference 800 ms late
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,6 +215,37 @@ mod tests {
 
     fn rms(s: &[f32]) -> f32 {
         (s.iter().map(|x| x * x).sum::<f32>() / s.len().max(1) as f32).sqrt()
+    }
+
+    /// Deterministic noise bursts: speech-like loudness changes.
+    fn bursts(len: usize) -> Vec<f32> {
+        let mut x: u32 = 12345;
+        (0..len)
+            .map(|i| {
+                x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                let noise = (x >> 16) as f32 / 32768.0 - 1.0;
+                let on = (i / 2400) % 3 != 0; // 150 ms on/off pattern
+                if on { noise * 0.3 } else { 0.0 }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn finds_how_late_the_reference_is() {
+        let speakers = bursts(16_000 * 6);
+        let late = 214 * 16; // 214 ms, as measured on a real recording
+        // The mic window is 1..5 s; its echo is the speakers' sound, quieter.
+        let mic: Vec<f32> = speakers[16_000..16_000 * 5].iter().map(|x| x * 0.3).collect();
+        // The reference track has the same sound `late` samples later.
+        let mut reference_track = vec![0.0; late];
+        reference_track.extend_from_slice(&speakers);
+        let from = 16_000 - DELAY_MIN;
+        let reference = &reference_track[from..from + mic.len() + DELAY_MIN + DELAY_MAX];
+        let found = estimate_delay(&mic, reference).expect("a clear match");
+        assert!((found - late as i64).abs() <= 32, "found {found}, expected {late}");
+        // Unrelated sound: no estimate.
+        let other = bursts(16_000 * 7);
+        assert_eq!(estimate_delay(&vec![0.0; mic.len()], &other[..reference.len()]), None);
     }
 
     #[test]

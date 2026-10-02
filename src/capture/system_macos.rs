@@ -113,7 +113,7 @@ unsafe extern "C-unwind" fn io_proc(
     _device: AudioObjectID,
     _now: NonNull<AudioTimeStamp>,
     input: NonNull<AudioBufferList>,
-    _input_time: NonNull<AudioTimeStamp>,
+    input_time: NonNull<AudioTimeStamp>,
     _output: NonNull<AudioBufferList>,
     _output_time: NonNull<AudioTimeStamp>,
     client: *mut c_void,
@@ -138,7 +138,13 @@ unsafe extern "C-unwind" fn io_proc(
         let n = buffers.len() as f32;
         ctx.mono.iter_mut().for_each(|m| *m /= n);
     }
-    (ctx.sink)(&ctx.mono, ctx.rate);
+    let time = unsafe { input_time.as_ref() };
+    let captured = if time.mFlags.contains(objc2_core_audio_types::AudioTimeStampFlags::HostTimeValid) {
+        super::host_ticks_to_ns(time.mHostTime)
+    } else {
+        super::now_ns()
+    };
+    (ctx.sink)(&ctx.mono, ctx.rate, captured);
     0
 }
 

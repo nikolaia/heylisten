@@ -14,9 +14,9 @@ use anyhow::{Context, Result, bail};
 use chrono::Local;
 use serde::{Deserialize, Serialize};
 
-use crate::aec::Aec;
+use crate::aec::{Aec, DELAY_MAX, DELAY_MIN, estimate_delay};
 use crate::audio::{self, To16k, WavWriter};
-use crate::capture::{Mic, System};
+use crate::capture::{self, Mic, System};
 use crate::config::{Config, meetings_dir};
 use crate::live::{self, Chunker};
 use crate::meeting::{Meeting, Track};
@@ -38,7 +38,17 @@ impl Recorder {
         let echo = match Aec::new() {
             Ok(aec) => {
                 log("echo cancellation: on (DTLN-aec)");
-                Echo::Cancel { aec: Box::new(aec), loopback: loopback.clone(), pending: Vec::new(), next: 0, levels: Levels::new(debug) }
+                Echo::Cancel(Box::new(Canceller {
+                    aec,
+                    loopback: loopback.clone(),
+                    pending: Vec::new(),
+                    next: 0,
+                    delay: 0,
+                    history: VecDeque::new(),
+                    since_estimate: 0,
+                    levels: Levels::new(debug),
+                    debug,
+                }))
             }
             Err(e) => {
                 log(&format!("echo cancellation: off ({e:#})"));
@@ -47,8 +57,8 @@ impl Recorder {
         };
         let (mic_tx, mic_writer) = track_writer(meeting, Track::Mic, live_tx.clone(), echo, debug)?;
         let (sys_tx, sys_writer) = track_writer(meeting, Track::System, live_tx, Echo::Reference(loopback), debug)?;
-        let mic = Mic::start(Box::new(move |s, rate| drop(mic_tx.send((s.to_vec(), rate)))), debug)?;
-        let system = System::start(Box::new(move |s, rate| drop(sys_tx.send((s.to_vec(), rate)))))?;
+        let mic = Mic::start(Box::new(move |s, rate, at| drop(mic_tx.send((s.to_vec(), rate, at)))), debug)?;
+        let system = System::start(Box::new(move |s, rate, at| drop(sys_tx.send((s.to_vec(), rate, at)))))?;
         // Always logged, so a bad recording can be traced to the device it came from.
         log(&format!("mic: {} ({} Hz, {} ch)", mic.device, mic.rate, mic.channels));
         log(&format!("system audio: tap of everything except heyListen, output device {}", system.device));
@@ -75,7 +85,12 @@ impl Recorder {
     }
 }
 
-type Audio = (Vec<f32>, u32);
+/// Samples, their rate, and when the first was captured (`capture::now_ns` clock).
+type Audio = (Vec<f32>, u32, u64);
+
+/// A source that's this late is filled with silence up to its capture time. Small enough to
+/// keep the tracks aligned to the millisecond; big enough to ignore buffer timing jitter.
+const MAX_GAP_NS: u64 = 10_000_000;
 
 /// The system track's recent 16 kHz audio, by absolute sample index: what the mic may hear
 /// back from the speakers.
@@ -112,10 +127,96 @@ impl Loopback {
 enum Echo {
     /// The system track: it's the reference the mic is cleaned against.
     Reference(Arc<Mutex<Loopback>>),
-    /// The mic: cancel the reference out of it first. `pending` is mic audio from sample `next`
-    /// on, waiting for the reference to catch up.
-    Cancel { aec: Box<Aec>, loopback: Arc<Mutex<Loopback>>, pending: Vec<f32>, next: u64, levels: Levels },
+    /// The mic: cancel the reference out of it first.
+    Cancel(Box<Canceller>),
     Off,
+}
+
+/// Cleans the mic against the reference. `pending` is mic audio from sample `next` on, waiting
+/// for the reference to catch up; `delay` is how late the reference runs, measured from the
+/// audio itself every couple of seconds.
+struct Canceller {
+    aec: Aec,
+    loopback: Arc<Mutex<Loopback>>,
+    pending: Vec<f32>,
+    next: u64,
+    delay: i64,
+    /// The last few seconds of mic audio before cancellation, to measure `delay` on.
+    history: VecDeque<f32>,
+    since_estimate: usize,
+    levels: Levels,
+    debug: bool,
+}
+
+impl Canceller {
+    const HISTORY: usize = audio::SAMPLE_RATE as usize * 5;
+    const ESTIMATE_EVERY: usize = audio::SAMPLE_RATE as usize * 2;
+
+    fn put(&mut self, samples: &[f32]) -> Result<Vec<f32>> {
+        self.pending.extend_from_slice(samples);
+        let start = self.reference_start();
+        let (ready, reference) = {
+            let loopback = self.loopback.lock().unwrap();
+            let available = loopback.end().saturating_sub(start) as usize;
+            // Wait for the reference, but never longer than ECHO_WAIT beyond its delay.
+            let wait = ECHO_WAIT + self.delay.max(0) as usize;
+            let ready = available.min(self.pending.len()).max(self.pending.len().saturating_sub(wait));
+            (ready, loopback.take(start, ready))
+        };
+        let clean = self.process(ready, &reference)?;
+        self.since_estimate += ready;
+        if self.since_estimate >= Self::ESTIMATE_EVERY && self.history.len() == Self::HISTORY {
+            self.since_estimate = 0;
+            self.estimate_delay();
+        }
+        Ok(clean)
+    }
+
+    fn finish(&mut self) -> Result<Vec<f32>> {
+        let reference = self.loopback.lock().unwrap().take(self.reference_start(), self.pending.len());
+        let mut clean = self.process(self.pending.len(), &reference)?;
+        self.aec.finish(&mut clean)?;
+        Ok(clean)
+    }
+
+    fn reference_start(&self) -> u64 {
+        (self.next as i64 + self.delay).max(0) as u64
+    }
+
+    fn process(&mut self, n: usize, reference: &[f32]) -> Result<Vec<f32>> {
+        let mut clean = Vec::new();
+        self.aec.process(&self.pending[..n], reference, &mut clean)?;
+        self.levels.add(&self.pending[..n], reference, &clean);
+        self.history.extend(&self.pending[..n]);
+        let excess = self.history.len().saturating_sub(Self::HISTORY);
+        self.history.drain(..excess);
+        self.pending.drain(..n);
+        self.next += n as u64;
+        Ok(clean)
+    }
+
+    /// Measures how late the reference is, on the mic's [−5 s, −1 s) window (whose reference,
+    /// even 800 ms late, is already in).
+    fn estimate_delay(&mut self) {
+        let window_len = Self::HISTORY - audio::SAMPLE_RATE as usize;
+        let window: Vec<f32> = self.history.iter().take(window_len).copied().collect();
+        let window_start = self.next - Self::HISTORY as u64;
+        let reference = self.loopback.lock().unwrap().take(
+            window_start.saturating_sub(DELAY_MIN as u64),
+            window_len + DELAY_MIN + DELAY_MAX,
+        );
+        if window_start < DELAY_MIN as u64 {
+            return;
+        }
+        if let Some(delay) = estimate_delay(&window, &reference)
+            && (delay - self.delay).abs() > 16
+        {
+            if self.debug {
+                log(&format!("echo cancellation: speakers' audio arrives {} ms late; adjusted", delay * 1000 / audio::SAMPLE_RATE as i64));
+            }
+            self.delay = delay;
+        }
+    }
 }
 
 /// In debug mode: the mic's level before and after echo cancellation, and the reference's,
@@ -173,33 +274,15 @@ impl Output {
                 return self.write(samples);
             }
             Echo::Off => return self.write(samples),
-            Echo::Cancel { aec, loopback, pending, next, levels } => {
-                pending.extend_from_slice(samples);
-                let (ready, reference) = {
-                    let loopback = loopback.lock().unwrap();
-                    let available = loopback.end().saturating_sub(*next) as usize;
-                    let ready = available.min(pending.len()).max(pending.len().saturating_sub(ECHO_WAIT));
-                    (ready, loopback.take(*next, ready))
-                };
-                let mut clean = Vec::new();
-                aec.process(&pending[..ready], &reference, &mut clean)?;
-                levels.add(&pending[..ready], &reference, &clean);
-                pending.drain(..ready);
-                *next += ready as u64;
-                clean
-            }
+            Echo::Cancel(c) => c.put(samples)?,
         };
         self.write(&clean)
     }
 
     /// Flushes everything still held back, with silence as the reference beyond what there is.
     fn finish(mut self) -> Result<()> {
-        if let Echo::Cancel { aec, loopback, pending, next, .. } = &mut self.echo {
-            let reference = loopback.lock().unwrap().take(*next, pending.len());
-            let mut clean = Vec::new();
-            aec.process(pending, &reference, &mut clean)?;
-            aec.finish(&mut clean)?;
-            pending.clear();
+        if let Echo::Cancel(c) = &mut self.echo {
+            let clean = c.finish()?;
             self.write(&clean)?;
         }
         let mut chunks = Vec::new();
@@ -233,16 +316,18 @@ fn track_writer(
 ) -> Result<(mpsc::Sender<Audio>, JoinHandle<Result<()>>)> {
     let (tx, rx) = mpsc::channel::<Audio>();
     let mut output = Output { wav: WavWriter::create(&meeting.track_path(track))?, chunker: Chunker::new(track), live, echo };
-    let start = meeting.start;
+    // The meeting's start on the capture clock.
+    let since_start = (Local::now() - meeting.start).num_nanoseconds().unwrap_or(0).max(0) as u64;
+    let start_ns = capture::now_ns().saturating_sub(since_start);
     let handle = thread::spawn(move || {
         let mut resampler: Option<(To16k, u32)> = None;
         let mut out = Vec::new();
         let mut last_flush = Instant::now();
         let t0 = Instant::now();
         let (mut got, mut last_log) = (0usize, Instant::now());
-        // 16 kHz samples written so far, silence included.
-        let mut written: u64 = 0;
-        for (samples, rate) in rx {
+        // When the next sample is due, on the capture clock.
+        let mut position_ns = start_ns;
+        for (samples, rate, captured) in rx {
             got += samples.len();
             if debug && last_log.elapsed() > Duration::from_secs(1) {
                 log(&format!("{:?}: {:5.1}s in, received {:6.2}s of audio at {rate} Hz", track, t0.elapsed().as_secs_f32(), got as f32 / rate as f32));
@@ -257,7 +342,6 @@ fn track_writer(
                 out.clear();
                 rs.finish(&mut out)?;
                 output.put(&out)?;
-                written += out.len() as u64;
                 resampler = Some((To16k::new(rate)?, rate));
             }
             let rs = match &mut resampler {
@@ -265,22 +349,23 @@ fn track_writer(
                 None => &mut resampler.insert((To16k::new(rate)?, rate)).0,
             };
             out.clear();
-            rs.push(&samples, &mut out)?;
 
-            // Keep the track in step with the clock. A source can start late, and macOS's
-            // system-audio tap delivers nothing while nothing is playing: fill those gaps with
-            // silence, so both tracks (and the timestamps) stay lined up with real time.
-            let due = (Local::now() - start).num_milliseconds().max(0) as u64 * audio::SAMPLE_RATE as u64 / 1000;
-            let gap = due.saturating_sub(written + out.len() as u64);
-            if gap > audio::SAMPLE_RATE as u64 * 3 / 10 {
-                if debug {
-                    log(&format!("{:?}: {:.1} s without audio, filled with silence", track, gap as f32 / audio::SAMPLE_RATE as f32));
+            // Place the audio by when it was captured, not when it arrived. A source can start
+            // late, and macOS's system-audio tap delivers nothing while nothing plays: fill those
+            // gaps with silence at the device's rate, so both tracks stay lined up to the
+            // millisecond, which echo cancellation depends on.
+            let gap_ns = captured.saturating_sub(position_ns);
+            if gap_ns > MAX_GAP_NS {
+                if debug && gap_ns > 300_000_000 {
+                    log(&format!("{:?}: {:.1} s without audio, filled with silence", track, gap_ns as f64 / 1e9));
                 }
-                output.put(&vec![0.0; gap as usize])?;
-                written += gap;
+                let silence = (gap_ns as u128 * rate as u128 / 1_000_000_000) as usize;
+                rs.push(&vec![0.0; silence], &mut out)?;
+                position_ns = captured;
             }
+            rs.push(&samples, &mut out)?;
+            position_ns += samples.len() as u64 * 1_000_000_000 / rate as u64;
             output.put(&out)?;
-            written += out.len() as u64;
             if last_flush.elapsed() > Duration::from_secs(1) {
                 output.wav.flush()?;
                 last_flush = Instant::now();

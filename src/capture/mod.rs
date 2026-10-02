@@ -1,5 +1,5 @@
-//! Audio sources. Each one calls its sink with mono f32 samples and their sample rate,
-//! on an audio thread, until it's dropped.
+//! Audio sources. Each one calls its sink with mono f32 samples, their sample rate, and when
+//! the first of them was captured (see `now_ns`), on an audio thread, until it's dropped.
 
 mod mic;
 #[cfg(target_os = "macos")]
@@ -7,7 +7,36 @@ mod system_macos;
 
 pub use mic::Mic;
 
-pub type Sink = Box<dyn FnMut(&[f32], u32) + Send>;
+pub type Sink = Box<dyn FnMut(&[f32], u32, u64) + Send>;
+
+/// Now, on the clock capture times use, in nanoseconds. On macOS that's the host clock both the
+/// mic and the system-audio tap stamp their buffers with, so the two tracks can be lined up
+/// exactly, whenever each buffer happens to arrive.
+#[cfg(target_os = "macos")]
+pub fn now_ns() -> u64 {
+    host_ticks_to_ns(unsafe { mach2::mach_time::mach_absolute_time() })
+}
+
+#[cfg(target_os = "macos")]
+pub fn host_ticks_to_ns(ticks: u64) -> u64 {
+    use std::sync::OnceLock;
+    static TIMEBASE: OnceLock<(u64, u64)> = OnceLock::new();
+    let (numer, denom) = *TIMEBASE.get_or_init(|| {
+        let mut info = mach2::mach_time::mach_timebase_info::default();
+        unsafe { mach2::mach_time::mach_timebase_info(&mut info) };
+        (info.numer as u64, info.denom.max(1) as u64)
+    });
+    (ticks as u128 * numer as u128 / denom as u128) as u64
+}
+
+/// Elsewhere there's no shared capture clock yet: buffers are stamped when they arrive.
+#[cfg(not(target_os = "macos"))]
+pub fn now_ns() -> u64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_nanos() as u64
+}
 
 /// Everything this machine plays, except heyListen itself.
 #[cfg(target_os = "macos")]

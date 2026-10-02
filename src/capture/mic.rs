@@ -26,9 +26,17 @@ impl Mic {
         let (mut peaks, mut frames) = (vec![0f32; channels], 0usize);
         let stream = device.build_input_stream(
             config.into(),
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
+            move |data: &[f32], info: &cpal::InputCallbackInfo| {
                 downmix_active(data, channels, &mut mono);
-                sink(&mono, rate);
+                // On macOS cpal stamps buffers on the host clock, like the system-audio tap.
+                #[cfg(target_os = "macos")]
+                let captured = info.timestamp().capture.as_nanos() as u64;
+                #[cfg(not(target_os = "macos"))]
+                let captured = {
+                    let _ = info;
+                    super::now_ns()
+                };
+                sink(&mono, rate, captured);
                 if debug {
                     for (i, s) in data.iter().enumerate() {
                         peaks[i % channels] = peaks[i % channels].max(s.abs());
