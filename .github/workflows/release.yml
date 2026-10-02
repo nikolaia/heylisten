@@ -54,6 +54,14 @@ jobs:
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: target/heyListen-macos-arm64.zip
+      - name: Release notes from CHANGELOG.md
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          # The section for this version, without its heading; no section, no release.
+          awk -v v="${VERSION#v}" '$0 ~ "^## \\[" {on = index($0, "## [" v "]") == 1; next} /^\[[^]]+\]: / {next} on' CHANGELOG.md > target/NOTES.md
+          test -s target/NOTES.md || { echo "CHANGELOG.md has no section for $VERSION"; exit 1; }
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
@@ -61,4 +69,4 @@ jobs:
           files: |
             target/heyListen-macos-arm64.zip
             target/SHA256SUMS
-          generate_release_notes: true
+          body_path: target/NOTES.md
