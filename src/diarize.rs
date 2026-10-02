@@ -24,6 +24,41 @@ const THREADS: i32 = 4;
 
 /// Finds who speaks when in 16 kHz mono audio. The number of speakers is detected.
 pub fn diarize(samples: &[f32], debug: bool) -> Result<Vec<Turn>> {
+    diarize_with(samples, Clustering::default(), debug)
+}
+
+/// How voices are grouped into speakers.
+#[derive(Debug, Clone, Copy)]
+pub struct Clustering {
+    /// sherpa-onnx's clustering: voices closer than this (cosine distance) count as the same
+    /// speaker. On its own it splits real people into many small speakers.
+    pub threshold: f32,
+    pub min_duration_on: f32,
+    pub min_duration_off: f32,
+    /// Then heyListen merges speakers whose averaged voices are this similar (cosine)...
+    pub merge_similarity: f32,
+    /// ...or, for a speaker with less than `small_secs` of speech, this similar.
+    pub small_similarity: f32,
+    pub small_secs: f32,
+}
+
+impl Default for Clustering {
+    fn default() -> Clustering {
+        Clustering {
+            threshold: 0.5,
+            min_duration_on: 0.3,
+            min_duration_off: 0.5,
+            // The most alike different people seen in testing were 0.65 similar, so 0.7 stays
+            // above that.
+            merge_similarity: 0.7,
+            small_similarity: 0.5,
+            small_secs: 10.0,
+        }
+    }
+}
+
+/// `diarize` with explicit clustering settings, for tuning.
+pub fn diarize_with(samples: &[f32], clustering: Clustering, debug: bool) -> Result<Vec<Turn>> {
     use sherpa_rs::sherpa_rs_sys as sys;
     use std::ffi::CString;
 
@@ -45,9 +80,9 @@ pub fn diarize(samples: &[f32], debug: bool) -> Result<Vec<Turn>> {
             debug: 0,
             provider: provider.as_ptr(),
         },
-        clustering: sys::SherpaOnnxFastClusteringConfig { num_clusters: -1, threshold: 0.5 }, // detect the speaker count
-        min_duration_on: 0.3,
-        min_duration_off: 0.5,
+        clustering: sys::SherpaOnnxFastClusteringConfig { num_clusters: -1, threshold: clustering.threshold }, // detect the count
+        min_duration_on: clustering.min_duration_on,
+        min_duration_off: clustering.min_duration_off,
     };
 
     let mut turns = Vec::new();
@@ -73,12 +108,123 @@ pub fn diarize(samples: &[f32], debug: bool) -> Result<Vec<Turn>> {
             bail!("speaker recognition failed");
         }
     }
+    merge_speakers(samples, &mut turns, clustering, &embedding)?;
     if debug {
         for t in &turns {
             crate::recorder::log(&format!("turn {:.2}–{:.2} s: speaker {}", t.start_ms as f32 / 1000.0, t.end_ms as f32 / 1000.0, t.speaker));
         }
     }
     Ok(turns)
+}
+
+/// The second step: an averaged voice per speaker, then merging, most similar pair first:
+/// two speakers if their voices are clearly the same, a small one into a bigger one at a lower
+/// bar. A speaker too short to measure goes to whoever spoke right next to it. The voices exist
+/// only here, in memory.
+fn merge_speakers(samples: &[f32], turns: &mut [Turn], clustering: Clustering, model: &std::ffi::CString) -> Result<()> {
+    use sherpa_rs::sherpa_rs_sys as sys;
+    use std::collections::BTreeMap;
+
+    if clustering.merge_similarity > 1.0 && clustering.small_similarity > 1.0 {
+        return Ok(());
+    }
+    let mut speech: BTreeMap<i32, f32> = BTreeMap::new();
+    for t in turns.iter() {
+        *speech.entry(t.speaker).or_default() += (t.end_ms - t.start_ms) as f32 / 1000.0;
+    }
+    let provider = std::ffi::CString::new("cpu")?;
+    let config = sys::SherpaOnnxSpeakerEmbeddingExtractorConfig { model: model.as_ptr(), num_threads: THREADS, debug: 0, provider: provider.as_ptr() };
+    let mut voices: BTreeMap<i32, Vec<f32>> = BTreeMap::new();
+    unsafe {
+        let extractor = sys::SherpaOnnxCreateSpeakerEmbeddingExtractor(&config);
+        if extractor.is_null() {
+            bail!("couldn't load the speaker embedding model");
+        }
+        let dim = sys::SherpaOnnxSpeakerEmbeddingExtractorDim(extractor) as usize;
+        for &speaker in speech.keys() {
+            // Up to 60 s of the speaker's longest turns.
+            let mut own: Vec<&Turn> = turns.iter().filter(|t| t.speaker == speaker).collect();
+            own.sort_by_key(|t| std::cmp::Reverse(t.end_ms - t.start_ms));
+            let mut audio = Vec::new();
+            for t in own {
+                let (s, e) = ((t.start_ms * 16) as usize, ((t.end_ms * 16) as usize).min(samples.len()));
+                audio.extend_from_slice(&samples[s.min(e)..e]);
+                if audio.len() >= 16_000 * 60 {
+                    break;
+                }
+            }
+            if audio.len() < 16_000 {
+                continue; // too short to measure
+            }
+            let stream = sys::SherpaOnnxSpeakerEmbeddingExtractorCreateStream(extractor);
+            sys::SherpaOnnxOnlineStreamAcceptWaveform(stream, 16_000, audio.as_ptr(), audio.len() as i32);
+            sys::SherpaOnnxOnlineStreamInputFinished(stream);
+            if sys::SherpaOnnxSpeakerEmbeddingExtractorIsReady(extractor, stream) != 0 {
+                let v = sys::SherpaOnnxSpeakerEmbeddingExtractorComputeEmbedding(extractor, stream);
+                if !v.is_null() {
+                    voices.insert(speaker, normalized(std::slice::from_raw_parts(v, dim)));
+                    sys::SherpaOnnxSpeakerEmbeddingExtractorDestroyEmbedding(v);
+                }
+            }
+            sys::SherpaOnnxDestroyOnlineStream(stream);
+        }
+        sys::SherpaOnnxDestroySpeakerEmbeddingExtractor(extractor);
+    }
+
+    let mut into: BTreeMap<i32, i32> = BTreeMap::new();
+    loop {
+        let ids: Vec<i32> = voices.keys().copied().collect();
+        let mut best: Option<(f32, i32, i32)> = None;
+        for (i, &a) in ids.iter().enumerate() {
+            for &b in &ids[i + 1..] {
+                let small = speech[&a].min(speech[&b]) < clustering.small_secs;
+                let bar = if small { clustering.small_similarity } else { clustering.merge_similarity };
+                let sim = dot(&voices[&a], &voices[&b]);
+                if sim >= bar && best.is_none_or(|(s, _, _)| sim > s) {
+                    best = Some((sim, a, b));
+                }
+            }
+        }
+        let Some((_, a, b)) = best else { break };
+        // Merge the smaller into the bigger, weighting the voices by speech.
+        let (keep, gone) = if speech[&a] >= speech[&b] { (a, b) } else { (b, a) };
+        let (wk, wg) = (speech[&keep], speech[&gone]);
+        let merged: Vec<f32> = voices[&keep].iter().zip(&voices[&gone]).map(|(k, g)| k * wk + g * wg).collect();
+        voices.insert(keep, normalized(&merged));
+        voices.remove(&gone);
+        *speech.get_mut(&keep).unwrap() += wg;
+        speech.remove(&gone);
+        into.insert(gone, keep);
+    }
+    let resolve = |mut s: i32| {
+        while let Some(&n) = into.get(&s) {
+            s = n;
+        }
+        s
+    };
+    for t in turns.iter_mut() {
+        t.speaker = resolve(t.speaker);
+    }
+    // Speakers too short to measure: whoever spoke right before (or after) them.
+    let measured: std::collections::BTreeSet<i32> = voices.keys().copied().collect();
+    for i in 0..turns.len() {
+        if !measured.contains(&turns[i].speaker) {
+            let neighbour = turns[..i].iter().rev().chain(turns[i + 1..].iter()).find(|t| measured.contains(&t.speaker)).map(|t| t.speaker);
+            if let Some(n) = neighbour {
+                turns[i].speaker = n;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn normalized(v: &[f32]) -> Vec<f32> {
+    let n = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
+    v.iter().map(|x| x / n).collect()
+}
+
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
 /// Labels the Others (system track) as Speaker 1, 2, 3… in order of appearance.
