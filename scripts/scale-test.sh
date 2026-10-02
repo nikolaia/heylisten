@@ -91,8 +91,9 @@ first = rows[0]
 f = 60 / m
 # Memory: the models are a fixed cost. What grows is the audio in memory and the summary's
 # context, which is sized to the transcript but capped at 32k tokens (about a 2.5-hour meeting).
-grow = (mem - first[4]) / (m - first[0]) if m > first[0] else 0
-mem60 = mem + grow * (60 - m)
+grow = max(0, (mem - first[4]) / (m - first[0])) if m > first[0] else 0
+peak = max(r[4] for r in rows)
+mem60 = peak + grow * (60 - m)
 speed = m * 60 / t if t else 0
 words60 = w * f
 tokens60 = words60 * 1.6  # Norwegian: roughly 1.6 tokens a word
@@ -102,6 +103,6 @@ print("Predicted for a 60-minute meeting:")
 print(f"  transcription: {t * f / 60:4.1f} min if redone with `process` (live keeps up: {speed:.0f}x real time, needs 2x for two tracks)")
 print(f"  speakers:      {s * f / 60:4.1f} min" + ("   (growing faster than the meeting!)" if len(rows) > 1 and s / m > 1.5 * rows[0][2] / rows[0][0] + 0.05 else ""))
 print(f"  summary:       ~{tokens60 / 1000:.0f}k tokens, {'one pass' if tokens60 < budget else f'split into {int(tokens60 // budget) + 1} parts'} (context {budget // 1000}k)")
-print(f"  peak memory:   at most ~{mem60 / 1000:.1f} GB (grows {grow:.0f} MB per minute; an upper bound, since the summary context is capped)")
+print(f"  peak memory:   at most ~{mem60 / 1000:.1f} GB (highest measured {peak / 1000:.1f} GB, growing {grow:.0f} MB per minute at most; the summary context is capped)")
 print(f"  CPU time:      ~{cpu * f / 60:.1f} min after stop, if everything is redone (live transcription spreads most of it over the meeting)")
 PY

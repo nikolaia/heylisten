@@ -8,6 +8,7 @@ use crate::transcript::{Segment, Who};
 
 pub struct Transcriber {
     state: WhisperState,
+    beam_size: u32,
 }
 
 impl Transcriber {
@@ -21,7 +22,12 @@ impl Transcriber {
         let mut params = WhisperContextParameters::default();
         params.flash_attn(true);
         let ctx = WhisperContext::new_with_params(path, params).with_context(|| format!("can't load whisper model {}", model.display()))?;
-        Ok(Transcriber { state: ctx.create_state()? })
+        Ok(Transcriber { state: ctx.create_state()?, beam_size: 5 })
+    }
+
+    /// 1 means greedy decoding. Only for comparing; heyListen always uses 5.
+    pub fn set_beam_size(&mut self, beam_size: u32) {
+        self.beam_size = beam_size.max(1);
     }
 
     /// Transcribes a chunk of 16 kHz mono speech in Norwegian. `offset_ms` is where it starts
@@ -52,9 +58,14 @@ impl Transcriber {
     /// One whisper pass over the samples.
     fn run(&mut self, samples: &[f32], offset_ms: u64, who: Who) -> Result<Vec<Segment>> {
         let state = &mut self.state;
-        // Greedy decoding with flash attention: twice as fast and 500 MB lighter than beam
-        // search, with the same text on our Norwegian benchmark. It runs during video calls.
-        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        // Beam search, as NB-Whisper's authors recommend ("greatly increases the accuracy").
+        // Greedy was twice as fast and identical on clean synthetic speech, but on real
+        // meetings it changed and invented words.
+        let strategy = match self.beam_size {
+            1 => SamplingStrategy::Greedy { best_of: 1 },
+            n => SamplingStrategy::BeamSearch { beam_size: n as i32, patience: -1.0 },
+        };
+        let mut params = FullParams::new(strategy);
         params.set_language(Some("no"));
         params.set_n_threads(4);
         params.set_print_special(false);
