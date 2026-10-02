@@ -1,5 +1,5 @@
 //! Tunes speaker separation against a recording with known speakers: a WAV (16 kHz mono) and a
-//! caption file with lines like "[01:06] Kari: …" (each line lasts until the next).
+//! caption file with lines like "[01:06] Kari: …" or "00:01:06 - Kari: …" (each line lasts until the next).
 //!
 //!   cargo run --release --example diarize_tune -- <file.wav> <captions.md> <threshold>:<merge>:<small>:<small_secs>...
 //!
@@ -18,11 +18,18 @@ fn main() {
         .unwrap()
         .lines()
         .filter_map(|l| {
-            let l = l.trim().strip_prefix('[')?;
-            let (time, rest) = l.split_once(']')?;
-            let (m, s) = time.split_once(':')?;
+            // "[mm:ss] Name: …" or "hh:mm:ss - Name: …"
+            let l = l.trim();
+            let (time, rest) = match l.strip_prefix('[') {
+                Some(l) => l.split_once(']')?,
+                None => l.split_once(" - ")?,
+            };
+            let mut secs = 0;
+            for part in time.split(':') {
+                secs = secs * 60 + part.parse::<u64>().ok()?;
+            }
             let who = rest.trim().split_once(':')?.0.trim().to_string();
-            Some((m.parse::<u64>().ok()? * 60_000 + s.parse::<u64>().ok()? * 1000, who))
+            Some((secs * 1000, who))
         })
         .collect();
     let truth = |t: u64| captions.iter().rev().find(|(start, _)| *start <= t).map(|(_, w)| w.clone());
@@ -48,8 +55,8 @@ fn main() {
         let mapping: Vec<String> = overlap
             .iter()
             .map(|(sp, m)| {
-                let (who, ms) = m.iter().max_by_key(|(_, v)| **v).unwrap();
-                format!("{sp}→{who} ({:.0}s)", *ms as f64 / 1000.0)
+                let parts: Vec<String> = m.iter().map(|(who, ms)| format!("{who} {:.0}s", *ms as f64 / 1000.0)).collect();
+                format!("{sp}: {}", parts.join(" + "))
             })
             .collect();
         println!(

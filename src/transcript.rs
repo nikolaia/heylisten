@@ -28,6 +28,15 @@ pub struct Segment {
     pub end_ms: u64,
     pub who: Who,
     pub text: String,
+    /// When each word starts, so a segment can be split where the speaker changes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<Word>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Word {
+    pub at_ms: u64,
+    pub text: String,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -132,17 +141,17 @@ mod tests {
     use super::*;
 
     fn seg(start_ms: u64, who: Who, text: &str) -> Segment {
-        Segment { start_ms, end_ms: start_ms + 1000, who, text: text.into() }
+        Segment { start_ms, end_ms: start_ms + 1000, who, text: text.into(), words: Vec::new() }
     }
 
     #[test]
     fn drops_mic_echo_of_others() {
         let t = Transcript::merge(vec![
             vec![
-                Segment { start_ms: 10_400, end_ms: 13_000, who: Who::Me, text: "Vi lanserer appen i november.".into() },
-                Segment { start_ms: 20_000, end_ms: 22_000, who: Who::Me, text: "Det høres bra ut, Kari.".into() },
+                Segment { start_ms: 10_400, end_ms: 13_000, who: Who::Me, text: "Vi lanserer appen i november.".into(), words: Vec::new() },
+                Segment { start_ms: 20_000, end_ms: 22_000, who: Who::Me, text: "Det høres bra ut, Kari.".into(), words: Vec::new() },
             ],
-            vec![Segment { start_ms: 10_000, end_ms: 12_500, who: Who::Others, text: "Vi lanserer appen i november".into() }],
+            vec![Segment { start_ms: 10_000, end_ms: 12_500, who: Who::Others, text: "Vi lanserer appen i november".into(), words: Vec::new() }],
         ]);
         let texts: Vec<&str> = t.segments.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(texts, ["Vi lanserer appen i november", "Det høres bra ut, Kari."]);

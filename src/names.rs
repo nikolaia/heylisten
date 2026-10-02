@@ -160,7 +160,7 @@ mod tests {
         let segments = lines
             .iter()
             .enumerate()
-            .map(|(i, (n, text))| Segment { start_ms: i as u64 * 1000, end_ms: i as u64 * 1000 + 900, who: Who::Speaker(*n), text: text.to_string() })
+            .map(|(i, (n, text))| Segment { start_ms: i as u64 * 1000, end_ms: i as u64 * 1000 + 900, who: Who::Speaker(*n), text: text.to_string(), words: Vec::new() })
             .collect();
         Transcript { segments, ..Default::default() }.paragraphs()
     }

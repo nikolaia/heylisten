@@ -1,14 +1,16 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState};
+use whisper_rs::{DtwMode, DtwModelPreset, DtwParameters, FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState, WhisperTokenId};
 
 use crate::audio;
-use crate::transcript::{Segment, Who};
+use crate::transcript::{Segment, Who, Word};
 
 pub struct Transcriber {
     state: WhisperState,
     beam_size: u32,
+    /// Tokens from here up are whisper's own markers, not text.
+    first_special: WhisperTokenId,
 }
 
 impl Transcriber {
@@ -18,11 +20,15 @@ impl Transcriber {
         }
         whisper_rs::install_logging_hooks(); // silences whisper.cpp's stderr chatter
         let path = model.to_str().context("model path is not valid UTF-8")?;
-        // Flash attention: about 25 % faster on Metal, same text.
+        // DTW word times: whisper's own segment times run up to a few seconds late, which put
+        // words on the wrong speaker. NB-Whisper large is fine-tuned from large-v3, so its
+        // alignment heads fit. Costs about a third more time, as whisper.cpp can't combine
+        // it with flash attention.
         let mut params = WhisperContextParameters::default();
-        params.flash_attn(true);
+        params.flash_attn(false);
+        params.dtw_parameters(DtwParameters { mode: DtwMode::ModelPreset { model_preset: DtwModelPreset::LargeV3 }, ..Default::default() });
         let ctx = WhisperContext::new_with_params(path, params).with_context(|| format!("can't load whisper model {}", model.display()))?;
-        Ok(Transcriber { state: ctx.create_state()?, beam_size: 5 })
+        Ok(Transcriber { first_special: ctx.token_eot(), state: ctx.create_state()?, beam_size: 5 })
     }
 
     /// 1 means greedy decoding. Only for comparing; heyListen always uses 5.
@@ -57,6 +63,7 @@ impl Transcriber {
 
     /// One whisper pass over the samples.
     fn run(&mut self, samples: &[f32], offset_ms: u64, who: Who) -> Result<Vec<Segment>> {
+        let first_special = self.first_special;
         let state = &mut self.state;
         // Beam search, as NB-Whisper's authors recommend ("greatly increases the accuracy").
         // Greedy was twice as fast and identical on clean synthetic speech, but on real
@@ -88,13 +95,27 @@ impl Transcriber {
             if text.is_empty() || s.no_speech_probability() > 0.6 || is_hallucination(&text) {
                 continue;
             }
-            // whisper timestamps are in centiseconds.
-            segments.push(Segment {
-                start_ms: offset_ms + (s.start_timestamp().max(0) as u64 * 10).min(len_ms),
-                end_ms: offset_ms + (s.end_timestamp().max(0) as u64 * 10).min(len_ms),
-                who,
-                text,
-            });
+            // whisper times are in centiseconds. A word starts at a token with a leading space;
+            // its bytes may be split over tokens (å, ø).
+            let at = |cs: i64| offset_ms + (cs.max(0) as u64 * 10).min(len_ms);
+            let mut words: Vec<(u64, Vec<u8>)> = Vec::new();
+            for i in 0..s.n_tokens() {
+                let Some(token) = s.get_token(i) else { continue };
+                if token.token_id() >= first_special {
+                    continue;
+                }
+                let bytes = token.to_bytes()?;
+                match words.last_mut() {
+                    Some((_, word)) if !bytes.starts_with(b" ") => word.extend_from_slice(bytes),
+                    _ => words.push((at(token.token_data().t_dtw), bytes.to_vec())),
+                }
+            }
+            let words = words
+                .into_iter()
+                .map(|(at_ms, bytes)| Word { at_ms, text: String::from_utf8_lossy(&bytes).trim().to_string() })
+                .filter(|w| !w.text.is_empty())
+                .collect();
+            segments.push(Segment { start_ms: at(s.start_timestamp()), end_ms: at(s.end_timestamp()), who, text, words });
         }
         Ok(segments)
     }

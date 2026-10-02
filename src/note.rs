@@ -113,8 +113,8 @@ mod tests {
             note: None,
         };
         let transcript = Transcript::merge(vec![vec![
-            Segment { start_ms: 4_000, end_ms: 6_000, who: Who::Me, text: "Hei.".into() },
-            Segment { start_ms: 3_725_000, end_ms: 3_726_000, who: Who::Speaker(1), text: "Hallo.".into() },
+            Segment { start_ms: 4_000, end_ms: 6_000, who: Who::Me, text: "Hei.".into(), words: Vec::new() },
+            Segment { start_ms: 3_725_000, end_ms: 3_726_000, who: Who::Speaker(1), text: "Hallo.".into(), words: Vec::new() },
         ]]);
         let summary = Summary { model: "borealis-12b".into(), text: "## Sammendrag\nKort.\n".into() };
         let note = render(&meeting, &transcript, "nb-whisper-large-q5_0", Some(&summary));

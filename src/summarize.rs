@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn splits_long_monologues() {
         let segments: Vec<Segment> = (0..10)
-            .map(|i| Segment { start_ms: i * 1000, end_ms: i * 1000 + 900, who: Who::Others, text: "x".repeat(84) })
+            .map(|i| Segment { start_ms: i * 1000, end_ms: i * 1000 + 900, who: Who::Others, text: "x".repeat(84), words: Vec::new() })
             .collect();
         let transcript = Transcript { segments, ..Default::default() };
         let parts = split(&transcript, 300);

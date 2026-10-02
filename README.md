@@ -183,7 +183,7 @@ The build downloads sherpa-onnx and two small speaker-recognition models, which 
 
 | For a 60-minute meeting | |
 |---|---|
-| Live transcription | keeps up at 5× real time |
+| Live transcription | keeps up at 3× real time (two tracks need 2×) |
 | After stop: speakers | ~4 min |
 | After stop: summary | ~30–60 s (one pass; meetings over ~2.5 h are summarized in parts) |
 | Peak memory | ~10 GB while summarizing (mostly the 7 GB summary model), ~1.6 GB while recording |

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 
 use crate::config::models_dir;
-use crate::transcript::{Segment, Who};
+use crate::transcript::{Segment, Who, Word};
 
 const SEGMENTATION: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/segmentation.onnx"));
 const EMBEDDING: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/embedding.onnx"));
@@ -229,14 +229,14 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
 
 /// Labels the Others (system track) as Speaker 1, 2, 3… in order of appearance.
 /// Returns how many speakers were found.
-pub fn label_others(segments: &mut [Segment], turns: &[Turn]) -> u32 {
+pub fn label_others(segments: &mut Vec<Segment>, turns: &[Turn]) -> u32 {
     let clusters = clusters(segments, turns, Who::Others);
     label(segments, &clusters, 1)
 }
 
 /// Labels the mic track. One voice stays Me. Several voices (a meeting room) can't tell which
 /// one is Me, so they become Speakers numbered from `first`, after the Others.
-pub fn label_mic(segments: &mut [Segment], turns: &[Turn], first: u32) {
+pub fn label_mic(segments: &mut Vec<Segment>, turns: &[Turn], first: u32) {
     let mut clusters = clusters(segments, turns, Who::Me);
     // A cluster with under 5 % of the mic's speech is usually one voice split in two, not a person.
     let mut time: HashMap<i32, u64> = HashMap::new();
@@ -273,20 +273,116 @@ pub fn renumber(segments: &mut [Segment]) {
     }
 }
 
-/// The diarization speaker of each segment said by `who` (None for everyone else): the one it
-/// overlaps most, or the nearest if none overlap.
-fn clusters(segments: &[Segment], turns: &[Turn], who: Who) -> Vec<Option<i32>> {
-    segments
-        .iter()
-        .map(|s| {
-            if s.who != who {
-                return None;
-            }
-            // Positive: overlap in ms. Negative: distance in ms.
+/// The diarization speaker of each segment said by `who` (None for everyone else). A segment
+/// whose words fall in different speakers' turns is first split there, as one whisper
+/// segment often spans a quick exchange.
+fn clusters(segments: &mut Vec<Segment>, turns: &[Turn], who: Who) -> Vec<Option<i32>> {
+    if turns.is_empty() {
+        return vec![None; segments.len()];
+    }
+    // Each word gets the speaker of the turn it starts in (the nearest if none; where turns
+    // overlap, the previous word's speaker if it's one of them). Over the whole track, so a
+    // change can move to a sentence end in the segment before.
+    let words: Vec<&Word> = segments.iter().filter(|s| s.who == who).flat_map(|s| &s.words).collect();
+    let mut speakers: Vec<i32> = Vec::with_capacity(words.len());
+    for w in &words {
+        let distance = |t: &Turn| t.start_ms.saturating_sub(w.at_ms) + w.at_ms.saturating_sub(t.end_ms.saturating_sub(1));
+        let previous = speakers.last().copied();
+        speakers.push(turns.iter().min_by_key(|t| (distance(t), Some(t.speaker) != previous)).unwrap().speaker);
+    }
+    let ends: Vec<bool> = words.iter().map(|w| w.text.ends_with(['.', '?', '!', '…'])).collect();
+    snap_to_sentences(&mut speakers, &ends);
+
+    let mut speakers = speakers.into_iter();
+    let mut out = Vec::with_capacity(segments.len());
+    let mut split = Vec::with_capacity(segments.len());
+    for s in segments.drain(..) {
+        if s.who != who {
+            out.push(None);
+            split.push(s);
+        } else if s.words.is_empty() {
+            // Older transcripts have no word times: the turn the segment overlaps most.
             let score = |t: &Turn| s.end_ms.min(t.end_ms) as i64 - s.start_ms.max(t.start_ms) as i64;
-            turns.iter().max_by_key(|t| score(t)).map(|t| t.speaker)
-        })
-        .collect()
+            out.push(turns.iter().max_by_key(|t| score(t)).map(|t| t.speaker));
+            split.push(s);
+        } else {
+            let own: Vec<i32> = speakers.by_ref().take(s.words.len()).collect();
+            for (speaker, part) in split_into_runs(s, own) {
+                out.push(Some(speaker));
+                split.push(part);
+            }
+        }
+    }
+    *segments = split;
+    out
+}
+
+/// Splits a segment into runs of words by one speaker.
+fn split_into_runs(s: Segment, speakers: Vec<i32>) -> Vec<(i32, Segment)> {
+    if speakers.iter().all(|sp| *sp == speakers[0]) {
+        return vec![(speakers[0], s)];
+    }
+    let mut parts: Vec<(i32, Segment)> = Vec::new();
+    for (w, speaker) in s.words.into_iter().zip(speakers) {
+        match parts.last_mut() {
+            Some((sp, part)) if *sp == speaker => part.words.push(w),
+            _ => {
+                if let Some((_, part)) = parts.last_mut() {
+                    part.end_ms = w.at_ms;
+                }
+                let start_ms = if parts.is_empty() { s.start_ms } else { w.at_ms };
+                parts.push((speaker, Segment { start_ms, end_ms: s.end_ms, who: s.who, text: String::new(), words: vec![w] }));
+            }
+        }
+    }
+    for (_, part) in &mut parts {
+        part.text = part.words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+    }
+    parts
+}
+
+/// Turn edges are off by a few hundred ms, which leaves a word or two on the wrong side of a
+/// speaker change ("Det var alt. Men | vi må ta budsjettet."). People change
+/// turns at the end of a sentence, so a change in mid-sentence moves to a sentence end at
+/// most `SNAP_WORDS` away, if there is one (the nearer one; backwards on a tie).
+fn snap_to_sentences(speakers: &mut [i32], ends_sentence: &[bool]) {
+    const SNAP_WORDS: usize = 3;
+    let ends = |i: usize| ends_sentence[i];
+    let n = speakers.len();
+    let mut i = 1;
+    while i < n {
+        if speakers[i] == speakers[i - 1] || ends(i - 1) {
+            i += 1;
+            continue;
+        }
+        // The change may move within the two runs it separates, leaving each a word.
+        let mut lo = i - 1;
+        while lo > 0 && speakers[lo - 1] == speakers[i - 1] {
+            lo -= 1;
+        }
+        let mut hi = i;
+        while hi + 1 < n && speakers[hi + 1] == speakers[i] {
+            hi += 1;
+        }
+        let to = (1..=SNAP_WORDS).find_map(|k| {
+            let back = Some(i.saturating_sub(k)).filter(|b| *b > lo && ends(b - 1));
+            let forward = Some(i + k).filter(|b| *b <= hi && ends(b - 1));
+            back.or(forward)
+        });
+        match to {
+            Some(to) if to < i => {
+                let after = speakers[i];
+                speakers[to..i].fill(after);
+            }
+            Some(to) => {
+                let before = speakers[i - 1];
+                speakers[i..to].fill(before);
+                i = to;
+            }
+            None => {}
+        }
+        i += 1;
+    }
 }
 
 /// Gives each cluster a Speaker number from `first`, in order of first appearance.
@@ -318,7 +414,7 @@ mod tests {
     use super::*;
 
     fn seg(start_ms: u64, end_ms: u64, who: Who) -> Segment {
-        Segment { start_ms, end_ms, who, text: String::new() }
+        Segment { start_ms, end_ms, who, text: String::new(), words: Vec::new() }
     }
 
     fn turn(start_ms: u64, end_ms: u64, speaker: i32) -> Turn {
@@ -328,7 +424,7 @@ mod tests {
     #[test]
     fn labels_others_by_overlap_in_order_of_appearance() {
         let turns = [turn(0, 5_000, 7), turn(5_000, 9_000, 3)];
-        let mut segments = [seg(500, 4_000, Who::Others), seg(4_500, 8_500, Who::Others), seg(1_000, 2_000, Who::Me), seg(20_000, 21_000, Who::Others)];
+        let mut segments = vec![seg(500, 4_000, Who::Others), seg(4_500, 8_500, Who::Others), seg(1_000, 2_000, Who::Me), seg(20_000, 21_000, Who::Others)];
         assert_eq!(label_others(&mut segments, &turns), 2);
         let who: Vec<Who> = segments.iter().map(|s| s.who).collect();
         assert_eq!(who, [Who::Speaker(1), Who::Speaker(2), Who::Me, Who::Speaker(2)]);
@@ -338,7 +434,7 @@ mod tests {
     fn one_voice_on_the_mic_stays_me() {
         // The second cluster has under 5 % of the speech: the same voice, split.
         let turns = [turn(0, 30_000, 0), turn(30_000, 31_000, 1)];
-        let mut segments = [seg(0, 29_000, Who::Me), seg(30_000, 31_000, Who::Me)];
+        let mut segments = vec![seg(0, 29_000, Who::Me), seg(30_000, 31_000, Who::Me)];
         label_mic(&mut segments, &turns, 3);
         assert!(segments.iter().all(|s| s.who == Who::Me));
     }
@@ -346,12 +442,43 @@ mod tests {
     #[test]
     fn several_voices_on_the_mic_become_speakers_after_the_others() {
         let turns = [turn(0, 5_000, 4), turn(5_000, 10_000, 2), turn(10_000, 15_000, 4)];
-        let mut segments = [seg(0, 5_000, Who::Me), seg(5_000, 10_000, Who::Me), seg(6_000, 7_000, Who::Speaker(1)), seg(10_000, 15_000, Who::Me)];
+        let mut segments = vec![seg(0, 5_000, Who::Me), seg(5_000, 10_000, Who::Me), seg(6_000, 7_000, Who::Speaker(1)), seg(10_000, 15_000, Who::Me)];
         label_mic(&mut segments, &turns, 2);
         let who: Vec<Who> = segments.iter().map(|s| s.who).collect();
         assert_eq!(who, [Who::Speaker(2), Who::Speaker(3), Who::Speaker(1), Who::Speaker(2)]);
         renumber(&mut segments);
         let who: Vec<Who> = segments.iter().map(|s| s.who).collect();
         assert_eq!(who, [Who::Speaker(1), Who::Speaker(2), Who::Speaker(3), Who::Speaker(1)]);
+    }
+
+    #[test]
+    fn splits_a_segment_where_its_words_change_speaker() {
+        // One asks, the other says "Nei.", the first goes on: one whisper segment.
+        let turns = [turn(23_700, 25_000, 13), turn(25_000, 26_700, 9), turn(27_300, 30_600, 13)];
+        let words = [(23_700, "Er"), (24_000, "du"), (24_900, "klar?"), (25_100, "Nei."), (27_200, "Ta"), (28_900, "tiden.")];
+        let mut s = seg(23_600, 29_600, Who::Others);
+        s.text = "Er du klar? Nei. Ta tiden.".into();
+        s.words = words.iter().map(|(at_ms, text)| Word { at_ms: *at_ms, text: (*text).into() }).collect();
+        let mut segments = vec![s, seg(40_000, 41_000, Who::Me)];
+        assert_eq!(label_others(&mut segments, &turns), 2);
+        let parts: Vec<(u64, u64, Who, &str)> = segments.iter().map(|s| (s.start_ms, s.end_ms, s.who, s.text.as_str())).collect();
+        assert_eq!(
+            parts,
+            [
+                (23_600, 25_100, Who::Speaker(1), "Er du klar?"),
+                (25_100, 27_200, Who::Speaker(2), "Nei."),
+                (27_200, 29_600, Who::Speaker(1), "Ta tiden."),
+                (40_000, 41_000, Who::Me, ""),
+            ]
+        );
+    }
+
+    #[test]
+    fn moves_a_speaker_change_to_the_nearest_sentence_end() {
+        let ends: Vec<bool> = "Det var alt, da. Men vi må ta budsjettet. Hva sier du til det?".split(' ').map(|w| w.ends_with(['.', '?'])).collect();
+        //               Det var alt, da. Men | vi må ta budsjettet. Hva sier | du til det?
+        let mut speakers = vec![1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 1, 1, 1];
+        snap_to_sentences(&mut speakers, &ends);
+        assert_eq!(speakers, [1, 1, 1, 1, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1]);
     }
 }
