@@ -38,8 +38,11 @@ impl Recorder {
         let echo = match Aec::new() {
             Ok(aec) => {
                 log("echo cancellation: on (DTLN-aec)");
+                // In debug mode the mic is also kept from before cancellation, to tune it offline.
+                let raw = if debug { WavWriter::create(&meeting.dir().join("mic-raw.wav")).ok() } else { None };
                 Echo::Cancel(Box::new(Canceller {
                     aec,
+                    raw,
                     loopback: loopback.clone(),
                     pending: Vec::new(),
                     next: 0,
@@ -137,6 +140,8 @@ enum Echo {
 /// audio itself every couple of seconds.
 struct Canceller {
     aec: Aec,
+    /// Debug mode: the mic before cancellation, sample-aligned with system.wav.
+    raw: Option<WavWriter>,
     loopback: Arc<Mutex<Loopback>>,
     pending: Vec<f32>,
     next: u64,
@@ -176,6 +181,9 @@ impl Canceller {
         let reference = self.loopback.lock().unwrap().take(self.reference_start(), self.pending.len());
         let mut clean = self.process(self.pending.len(), &reference)?;
         self.aec.finish(&mut clean)?;
+        if let Some(raw) = self.raw.take() {
+            raw.finish()?;
+        }
         Ok(clean)
     }
 
@@ -187,6 +195,9 @@ impl Canceller {
         let mut clean = Vec::new();
         self.aec.process(&self.pending[..n], reference, &mut clean)?;
         self.levels.add(&self.pending[..n], reference, &clean);
+        if let Some(raw) = &mut self.raw {
+            raw.write(&self.pending[..n])?;
+        }
         self.history.extend(&self.pending[..n]);
         let excess = self.history.len().saturating_sub(Self::HISTORY);
         self.history.drain(..excess);
@@ -208,16 +219,30 @@ impl Canceller {
         if window_start < DELAY_MIN as u64 {
             return;
         }
-        if let Some(delay) = estimate_delay(&window, &reference)
-            && (delay - self.delay).abs() > 16
-        {
-            if self.debug {
-                log(&format!("echo cancellation: speakers' audio arrives {} ms late; adjusted", delay * 1000 / audio::SAMPLE_RATE as i64));
+        // `found` is how late the reference runs, unshifted. DTLN-aec needs the reference to lead
+        // its echo, as it does physically: aligned exactly, it cancels almost nothing (measured:
+        // 8 dB, against 38 dB with a 15–45 ms lead).
+        if let Some(found) = estimate_delay(&window, &reference) {
+            let target = found + REFERENCE_LEAD;
+            if (target - self.delay).abs() > REFERENCE_SLACK {
+                if self.debug {
+                    log(&format!(
+                        "echo cancellation: speakers' audio {} ms late; reference shifted {} ms to lead the echo by {} ms",
+                        found * 1000 / audio::SAMPLE_RATE as i64,
+                        target * 1000 / audio::SAMPLE_RATE as i64,
+                        REFERENCE_LEAD * 1000 / audio::SAMPLE_RATE as i64
+                    ));
+                }
+                self.delay = target;
             }
-            self.delay = delay;
         }
     }
 }
+
+/// How far the reference should run ahead of its echo in the mic, in samples (30 ms).
+const REFERENCE_LEAD: i64 = audio::SAMPLE_RATE as i64 * 30 / 1000;
+/// Leads between about 15 and 45 ms cancel equally well; only shift when further off.
+const REFERENCE_SLACK: i64 = audio::SAMPLE_RATE as i64 * 15 / 1000;
 
 /// In debug mode: the mic's level before and after echo cancellation, and the reference's,
 /// logged every 5 s, to see what the cancellation removes.

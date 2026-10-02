@@ -19,7 +19,8 @@ const MODEL_2: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/aec_model_128_2
 const BLOCK: usize = 512;
 const SHIFT: usize = 128;
 const BINS: usize = BLOCK / 2 + 1;
-const STATES: usize = 2 * 128 * 2;
+/// LSTM units of the embedded model.
+const UNITS: usize = 128;
 
 type Plan = Arc<TypedRunnableModel>;
 
@@ -29,6 +30,7 @@ type Plan = Arc<TypedRunnableModel>;
 pub struct Aec {
     model_1: Plan,
     model_2: Plan,
+    units: usize,
     fft: Arc<dyn RealToComplex<f32>>,
     ifft: Arc<dyn ComplexToReal<f32>>,
     states_1: Vec<f32>,
@@ -46,17 +48,23 @@ pub struct Aec {
 
 impl Aec {
     pub fn new() -> Result<Aec> {
+        Aec::with_models(MODEL_1, MODEL_2, UNITS)
+    }
+
+    /// Another DTLN-aec size (its two ONNX models and LSTM units), for comparing.
+    pub fn with_models(model_1: &[u8], model_2: &[u8], units: usize) -> Result<Aec> {
         let load = |bytes: &[u8]| -> Result<Plan> {
             tract_onnx::onnx().model_for_read(&mut &bytes[..])?.into_optimized()?.into_runnable()
         };
         let mut planner = RealFftPlanner::<f32>::new();
         Ok(Aec {
-            model_1: load(MODEL_1).context("can't load the echo cancellation model")?,
-            model_2: load(MODEL_2).context("can't load the echo cancellation model")?,
+            model_1: load(model_1).context("can't load the echo cancellation model")?,
+            model_2: load(model_2).context("can't load the echo cancellation model")?,
+            units,
             fft: planner.plan_fft_forward(BLOCK),
             ifft: planner.plan_fft_inverse(BLOCK),
-            states_1: vec![0.0; STATES],
-            states_2: vec![0.0; STATES],
+            states_1: vec![0.0; 4 * units],
+            states_2: vec![0.0; 4 * units],
             mic: vec![0.0; BLOCK],
             lpb: vec![0.0; BLOCK],
             out: vec![0.0; BLOCK],
@@ -116,7 +124,7 @@ impl Aec {
 
         let (mut mic_spec, mic_mag) = self.spectrum(&self.mic)?;
         let (_, lpb_mag) = self.spectrum(&self.lpb)?;
-        let mask = run(&self.model_1, [(&[1, 1, BINS], &mic_mag), (&[1, 2, 128, 2], &self.states_1), (&[1, 1, BINS], &lpb_mag)])?;
+        let mask = run(&self.model_1, [(&[1, 1, BINS], &mic_mag), (&[1, 2, self.units, 2], &self.states_1), (&[1, 1, BINS], &lpb_mag)])?;
         self.states_1 = mask.1;
         for (c, m) in mic_spec.iter_mut().zip(&mask.0) {
             *c *= *m;
@@ -126,7 +134,7 @@ impl Aec {
         self.ifft.process_with_scratch(&mut mic_spec, &mut estimate, &mut scratch).context("echo cancellation: inverse FFT")?;
         estimate.iter_mut().for_each(|s| *s /= BLOCK as f32);
 
-        let block = run(&self.model_2, [(&[1, 1, BLOCK], &estimate), (&[1, 2, 128, 2], &self.states_2), (&[1, 1, BLOCK], &self.lpb)])?;
+        let block = run(&self.model_2, [(&[1, 1, BLOCK], &estimate), (&[1, 2, self.units, 2], &self.states_2), (&[1, 1, BLOCK], &self.lpb)])?;
         self.states_2 = block.1;
         // Overlap-add.
         self.out.copy_within(SHIFT.., 0);

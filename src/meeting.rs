@@ -123,7 +123,11 @@ impl Meeting {
     }
 }
 
-/// Deletes the track WAVs of every meeting in `dir` that ended before `cutoff`.
+/// Every audio file a meeting folder can hold: the tracks, and in debug mode the mic from before
+/// echo cancellation.
+pub const AUDIO_FILES: [&str; 3] = ["mic.wav", "system.wav", "mic-raw.wav"];
+
+/// Deletes the audio of every meeting in `dir` that ended before `cutoff`.
 fn prune_audio_in(dir: &Path, cutoff: DateTime<Local>) -> usize {
     let Ok(entries) = fs::read_dir(dir) else { return 0 };
     let mut pruned = 0;
@@ -135,8 +139,8 @@ fn prune_audio_in(dir: &Path, cutoff: DateTime<Local>) -> usize {
             continue;
         }
         let mut deleted = false;
-        for track in Track::ALL {
-            deleted |= fs::remove_file(entry.path().join(track.file_name())).is_ok();
+        for file in AUDIO_FILES {
+            deleted |= fs::remove_file(entry.path().join(file)).is_ok();
         }
         pruned += deleted as usize;
     }
@@ -158,10 +162,12 @@ mod tests {
             let meeting = Meeting { id: id.into(), title: id.into(), start: ended, end: ended, live_complete: true, note: None };
             fs::write(m.join("meeting.json"), serde_json::to_string(&meeting).unwrap()).unwrap();
             fs::write(m.join("mic.wav"), b"x").unwrap();
+            fs::write(m.join("mic-raw.wav"), b"x").unwrap();
             fs::write(m.join("transcript.json"), b"{}").unwrap();
         }
         assert_eq!(prune_audio_in(&dir, now - Duration::days(AUDIO_KEPT_DAYS)), 1);
         assert!(!dir.join("old/mic.wav").exists());
+        assert!(!dir.join("old/mic-raw.wav").exists());
         assert!(dir.join("old/transcript.json").exists(), "transcripts stay");
         assert!(dir.join("new/mic.wav").exists());
         fs::remove_dir_all(&dir).unwrap();

@@ -151,8 +151,8 @@ pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, on_event: O
     // Kept audio (keep_audio, debug, or a failed summary to retry) goes after AUDIO_KEPT_DAYS.
     Meeting::prune_old_audio();
     if !config.keep_audio && !config.debug && summary.is_some() {
-        for track in Track::ALL {
-            let _ = fs::remove_file(meeting.track_path(track));
+        for file in crate::meeting::AUDIO_FILES {
+            let _ = fs::remove_file(meeting.dir().join(file));
         }
         on_event(Event::AudioDeleted);
     }
