@@ -173,6 +173,7 @@ gh attestation verify heyListen-macos-arm64.zip --repo nikolaia/heylisten   # bu
 git clone https://github.com/nikolaia/heylisten && cd heylisten
 nix develop -c cargo build --release --features tray   # or use rustup + cmake
 nix develop -c scripts/bundle-macos.sh                  # → target/heyListen.app
+nix develop -c scripts/install-dev.sh                   # build, install in /Applications and restart
 ```
 
 The build downloads sherpa-onnx and two small speaker-recognition models, which get embedded in the binary. Pushing a `v*` tag runs [the release workflow](.github/workflows/release.yml), which builds the app and attaches the zip to a GitHub Release.
