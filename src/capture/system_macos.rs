@@ -14,7 +14,7 @@ use objc2_core_audio_types::{AudioBufferList, AudioStreamBasicDescription, Audio
 use objc2_core_foundation::{CFDictionary, CFRetained, CFString};
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString, NSUUID};
 
-use super::{Sink, downmix};
+use super::{RateCheck, Sink, downmix};
 
 pub struct System {
     tap: AudioObjectID,
@@ -27,6 +27,7 @@ pub struct System {
 struct Ctx {
     sink: Sink,
     rate: u32,
+    check: RateCheck,
     mono: Vec<f32>,
     scratch: Vec<f32>,
 }
@@ -77,8 +78,10 @@ impl System {
                 "create the aggregate device for system audio",
             )?;
 
-            let rate = format.mSampleRate as u32;
-            sys.ctx = Box::into_raw(Box::new(Ctx { sink, rate, mono: Vec::new(), scratch: Vec::new() }));
+            // Samples arrive at the aggregate device's rate, which follows the output device (a
+            // headset in call mode runs at 24 kHz or less), not at the tap's own format.
+            let rate = get::<f64>(sys.aggregate, kAudioDevicePropertyNominalSampleRate, None).unwrap_or(format.mSampleRate) as u32;
+            sys.ctx = Box::into_raw(Box::new(Ctx { sink, rate, check: RateCheck::default(), mono: Vec::new(), scratch: Vec::new() }));
             check(
                 AudioDeviceCreateIOProcID(sys.aggregate, Some(io_proc), sys.ctx as *mut c_void, NonNull::from(&mut sys.proc_id)),
                 "register the system audio callback",
@@ -144,6 +147,7 @@ unsafe extern "C-unwind" fn io_proc(
     } else {
         super::now_ns()
     };
+    ctx.rate = ctx.check.update(ctx.rate, ctx.mono.len(), captured);
     (ctx.sink)(&ctx.mono, ctx.rate, captured);
     0
 }

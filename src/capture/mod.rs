@@ -77,6 +77,47 @@ pub fn downmix_active(interleaved: &[f32], channels: usize, out: &mut Vec<f32>) 
 /// Below this, a channel counts as not connected (about −80 dBFS).
 const SILENT: f32 = 1e-4;
 
+/// Checks a device's reported sample rate against how fast samples actually arrive.
+/// AirPods and other Bluetooth headsets drop to a call-quality rate when a mic is in use,
+/// and macOS doesn't always say so; samples taken at the wrong rate sound like a duck.
+#[derive(Default)]
+pub struct RateCheck {
+    start_ns: u64,
+    last_ns: u64,
+    frames: u64,
+}
+
+impl RateCheck {
+    /// Over this long, the arrival rate is measured.
+    const WINDOW_NS: u64 = 2_000_000_000;
+    /// A pause this long (sleep, a stalled device) starts the measurement again.
+    const STALL_NS: u64 = 200_000_000;
+    /// The rates devices run at.
+    const RATES: [u32; 9] = [8_000, 11_025, 16_000, 22_050, 24_000, 32_000, 44_100, 48_000, 96_000];
+
+    /// Counts `frames` captured at `captured_ns`, and returns the rate to use: `rate`, unless
+    /// samples have been arriving at least 15 % faster or slower, then the nearest usual rate.
+    pub fn update(&mut self, rate: u32, frames: usize, captured_ns: u64) -> u32 {
+        let stalled = captured_ns.saturating_sub(self.last_ns) > Self::STALL_NS;
+        self.last_ns = captured_ns;
+        if self.start_ns == 0 || stalled {
+            (self.start_ns, self.frames) = (captured_ns, frames as u64);
+            return rate;
+        }
+        let elapsed = captured_ns - self.start_ns;
+        let mut rate = rate;
+        if elapsed >= Self::WINDOW_NS {
+            let measured = self.frames as f64 * 1e9 / elapsed as f64;
+            if (measured - rate as f64).abs() > rate as f64 * 0.15 {
+                rate = *Self::RATES.iter().min_by_key(|r| (**r as f64 - measured).abs() as u64).unwrap();
+            }
+            (self.start_ns, self.frames) = (captured_ns, 0);
+        }
+        self.frames += frames as u64;
+        rate
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,5 +133,32 @@ mod tests {
         downmix(&frames, 6, &mut out);
         assert!((out[0] - 0.5 / 6.0).abs() < 1e-6);
     }
-}
 
+    /// Feeds 10 ms buffers of `true_rate` audio, timed by the clock, for `secs` seconds.
+    fn feed(check: &mut RateCheck, mut rate: u32, true_rate: u32, start_ns: u64, secs: u64) -> u32 {
+        let frames = true_rate as usize / 100;
+        for i in 0..secs * 100 {
+            rate = check.update(rate, frames, start_ns + i * 10_000_000);
+        }
+        rate
+    }
+
+    #[test]
+    fn rate_check_follows_what_actually_arrives() {
+        let mut check = RateCheck::default();
+        // Reported 48 kHz, true: kept.
+        assert_eq!(feed(&mut check, 48_000, 48_000, 1_000_000_000, 5), 48_000);
+        // A headset switches to call mode: 24 kHz arrives, still reported as 48 kHz.
+        assert_eq!(feed(&mut check, 48_000, 24_000, 6_000_000_000, 5), 24_000);
+        // And back.
+        assert_eq!(feed(&mut check, 24_000, 48_000, 11_000_000_000, 5), 48_000);
+    }
+
+    #[test]
+    fn rate_check_ignores_a_pause() {
+        let mut check = RateCheck::default();
+        assert_eq!(feed(&mut check, 48_000, 48_000, 1_000_000_000, 1), 48_000);
+        // Ten seconds with no buffers (the Mac slept), then normal again.
+        assert_eq!(feed(&mut check, 48_000, 48_000, 12_000_000_000, 5), 48_000);
+    }
+}
