@@ -4,6 +4,9 @@ Du får en transkripsjon av et møte. Hver replikk starter med navnet på den so
 
 Skriv referatet på norsk, med nøyaktig disse overskriftene i denne rekkefølgen:
 
+## Tittel
+En kort tittel på møtet, 2 til 6 ord, som sier hva det handlet om, for eksempel «Planlegging av høstlanseringen». Bare tittelen, på én linje, uten dato.
+
 ## Sammendrag
 3 til 6 setninger om hva møtet handlet om og hva som kom ut av det.
 

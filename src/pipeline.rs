@@ -66,7 +66,6 @@ pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, on_event: O
         meeting.end = meeting.start + chrono::Duration::milliseconds((longest as i64 * 1000) / audio::SAMPLE_RATE as i64);
         meeting.save()?;
     }
-    let meeting = &meeting;
 
     let transcript = if reuse_live && meeting.live_complete {
         Transcript::merge(vec![live::read(&meeting.dir())?])
@@ -134,15 +133,23 @@ pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, on_event: O
         on_event(Event::Summarizing { part: 1, parts: 1 });
         writer.summarize(&transcript, |part, parts| on_event(Event::Summarizing { part, parts }))
     })()
-    .map(|text| Summary { model: summarize::model_name(config).to_string(), text })
+    .map(|mut text| {
+        // The summary's title names the note, unless the meeting was given one when it started.
+        if let Some(title) = note::take_title(&mut text)
+            && note::has_default_title(&meeting)
+        {
+            meeting.title = title;
+        }
+        Summary { model: summarize::model_name(config).to_string(), text }
+    })
     .inspect_err(|e| on_event(Event::SummaryFailed(format!("{e:#}"))))
     .ok();
     on_event(Event::Took("names and summary", started.elapsed()));
     fs::write(meeting.dir().join("transcript.json"), serde_json::to_string_pretty(&transcript)?)?;
 
     let model_name = config.whisper_model.file_stem().and_then(|s| s.to_str()).unwrap_or("whisper");
-    let contents = note::render(meeting, &transcript, model_name, summary.as_ref());
-    let note_path = note::write(&config.notes_dir, meeting, &contents)?;
+    let contents = note::render(&meeting, &transcript, model_name, summary.as_ref());
+    let note_path = note::write(&config.notes_dir, &meeting, &contents)?;
     let mut done = meeting.clone();
     done.note = Some(note_path.clone());
     done.save()?;

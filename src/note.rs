@@ -58,6 +58,27 @@ pub fn render(meeting: &Meeting, transcript: &Transcript, transcription_model: &
     out
 }
 
+/// Takes the "## Tittel" section out of a summary and returns the title in it, if it's a
+/// sensible one: one line, at most `MAX_TITLE` characters, without quotes or Markdown.
+pub fn take_title(summary: &mut String) -> Option<String> {
+    const MAX_TITLE: usize = 80;
+    let lines: Vec<&str> = summary.lines().collect();
+    let start = lines.iter().position(|l| l.trim().eq_ignore_ascii_case("## tittel"))?;
+    let end = lines[start + 1..].iter().position(|l| l.starts_with("## ")).map_or(lines.len(), |i| start + 1 + i);
+    let title = lines[start + 1..end].iter().map(|l| l.trim()).find(|l| !l.is_empty()).unwrap_or("");
+    let title = title.trim_start_matches("Tittel:").trim().trim_matches(|c: char| "\"'«»*#_`.".contains(c)).trim().to_string();
+    let rest: Vec<&str> = lines[..start].iter().chain(&lines[end..]).copied().collect();
+    *summary = rest.join("\n").trim().to_string();
+    (!title.is_empty() && !title.contains('\n') && title.chars().count() <= MAX_TITLE).then_some(title)
+}
+
+/// Whether a meeting still has the title it got when it started ("Møte 08:46"), so a title
+/// from the summary may replace it.
+pub fn has_default_title(meeting: &Meeting) -> bool {
+    let t = meeting.title.as_bytes();
+    meeting.title.starts_with("Møte ") && t.len() == "Møte 08:46".len() && t[t.len() - 3] == b':'
+}
+
 /// Models don't always write tasks as `- [ ]`; make every list item under "## Oppgaver" one.
 fn tasks_as_checkboxes(summary: &str) -> String {
     let mut in_tasks = false;
@@ -137,5 +158,30 @@ mod tests {
         assert!(out.contains("- [ ] Sende referat"));
         assert!(out.contains("## Tema\n- Budsjett"));
         assert_eq!(tasks_as_checkboxes("## Oppgaver\n- Ingen"), "## Oppgaver\n- Ingen");
+    }
+
+    #[test]
+    fn takes_the_title_out_of_the_summary() {
+        let mut summary = "## Tittel\n«Planlegging av høstlanseringen.»\n\n## Sammendrag\nKort.\n".to_string();
+        assert_eq!(take_title(&mut summary).as_deref(), Some("Planlegging av høstlanseringen"));
+        assert_eq!(summary, "## Sammendrag\nKort.");
+        let mut without = "## Sammendrag\nKort.".to_string();
+        assert_eq!(take_title(&mut without), None);
+        assert_eq!(without, "## Sammendrag\nKort.");
+    }
+
+    #[test]
+    fn only_the_start_time_title_is_default() {
+        let mut meeting = Meeting {
+            id: "x".into(),
+            title: "Møte 08:46".into(),
+            start: Local.with_ymd_and_hms(2026, 10, 1, 9, 0, 0).unwrap(),
+            end: Local.with_ymd_and_hms(2026, 10, 1, 9, 30, 0).unwrap(),
+            live_complete: false,
+            note: None,
+        };
+        assert!(has_default_title(&meeting));
+        meeting.title = "Møte med kunden".into();
+        assert!(!has_default_title(&meeting));
     }
 }

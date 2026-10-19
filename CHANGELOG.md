@@ -2,6 +2,15 @@
 
 What changed in each release. Each release's GitHub page shows its section from this file.
 
+## [Unreleased]
+
+### Added
+- **Meeting titles:** the summary model names each meeting ("Planlegging av høstlanseringen"), and the note is called that instead of "Møte 08:46". A title you give when starting is kept. An unedited summary prompt from an earlier version is updated to ask for the title; an edited one is left alone.
+
+### Fixed
+- **Others sounding like a duck with AirPods.** In call mode, AirPods run at 24 kHz while the system audio tap reported 48 kHz, so other participants were recorded at double speed and transcribed as "kvakk kvakk". heyListen now uses the device's real rate and checks it against how fast audio arrives.
+- **Security:** rustls 0.23.46, for four advisories in the library behind heyListen's HTTPS downloads (RUSTSEC-2026-0346 to -0349).
+
 ## [0.1.0] - 2026-10-02
 
 The first release. heyListen records, transcribes and summarizes Norwegian meetings on your Mac, and nothing leaves the machine.
@@ -27,4 +36,5 @@ The first release. heyListen records, transcribes and summarizes Norwegian meeti
 - **Debug mode is on by default** while heyListen is being tuned: it keeps each meeting's audio for 7 days, so a note can be redone. Turn it off in the menu.
 - **Teams mode** (record only Teams, silence the mic while you're muted) isn't in this release.
 
+[Unreleased]: https://github.com/nikolaia/heylisten/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/nikolaia/heylisten/releases/tag/v0.1.0

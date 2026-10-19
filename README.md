@@ -80,7 +80,7 @@ The app bundles a `heylisten` CLI that does the same things, which is handy for 
 ```bash
 alias heylisten=/Applications/heyListen.app/Contents/MacOS/heylisten
 
-heylisten start [title]        # record in the background and show the live transcript
+heylisten start [title]        # record in the background and show the live transcript (no title: the summary names it)
                                # (Ctrl+C closes the view; recording continues)
 heylisten watch                # re-attach the live view
 heylisten status               # recording or idle

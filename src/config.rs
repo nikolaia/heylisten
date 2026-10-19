@@ -6,6 +6,12 @@ use serde::Deserialize;
 
 const DEFAULT_CONFIG: &str = include_str!("default-config.toml");
 const DEFAULT_PROMPT: &str = include_str!("summary-prompt.md");
+/// SHA-256 of earlier default prompts. A prompt file still equal to one was never edited, so it
+/// gets the current default; an edited prompt is left alone.
+const EARLIER_PROMPTS: [&str; 2] = [
+    "79a3e7e07349725b1846c1447bf4c943fe32efcfe23c31df6d97c312dd561680",
+    "7cda7590cefe62cfa854125b0690b4991ad0c0baa72f794aac580f49b92eb38b",
+];
 
 /// Every key is optional; the defaults suit a fresh install.
 #[derive(Debug, Clone, Deserialize)]
@@ -63,6 +69,13 @@ impl Config {
         for (file, default) in [(&path, DEFAULT_CONFIG), (&prompt_path(), DEFAULT_PROMPT)] {
             if !file.exists() {
                 fs::write(file, default)?;
+            }
+        }
+        if let Ok(prompt) = fs::read(prompt_path()) {
+            use sha2::{Digest, Sha256};
+            let sha: String = Sha256::digest(&prompt).iter().map(|b| format!("{b:02x}")).collect();
+            if EARLIER_PROMPTS.contains(&sha.as_str()) {
+                fs::write(prompt_path(), DEFAULT_PROMPT)?;
             }
         }
         let text = fs::read_to_string(&path)?;
