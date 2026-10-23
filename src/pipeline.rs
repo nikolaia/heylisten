@@ -57,11 +57,13 @@ pub enum Mode {
 /// as is; otherwise everything is transcribed again from the saved audio. Returns the note's path.
 pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, mode: Mode, on_event: OnEvent) -> Result<PathBuf> {
     let mut tracks = Vec::new();
+    let mut found = false;
     for track in Track::ALL {
         let path = meeting.track_path(track);
         if !path.exists() {
             continue;
         }
+        found = true;
         let samples = audio::read(&path)?;
         if !audio::has_speech(&samples) {
             on_event(Event::SkippedSilentTrack(track));
@@ -80,6 +82,9 @@ pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, mode: Mode,
     let transcript = if reuse_live && meeting.live_complete {
         Transcript::merge(vec![live::read(&meeting.dir())?])
     } else {
+        if found && tracks.is_empty() {
+            bail!("no speech in meeting {} ('{}'): nothing to transcribe", meeting.id, meeting.title);
+        }
         if tracks.is_empty() {
             bail!(
                 "meeting {} has no audio in {} (audio is deleted after the note is written, or after 7 days with keep_audio or debug)",

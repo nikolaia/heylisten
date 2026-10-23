@@ -580,6 +580,7 @@ fn spawn_stop(config: Config, mode: Mode, proxy: EventLoopProxy<UserEvent>) {
                 let _ = p.send_event(UserEvent::Busy(step.into()));
             });
             pipeline::process(&meeting, &config, true, mode, on_event)
+                .with_context(|| format!("couldn't make the note for '{}' (try again: heylisten process {})", meeting.title, meeting.id))
         })();
         let _ = proxy.send_event(UserEvent::Done(result.map(Some).map_err(|e| format!("{e:#}"))));
     });

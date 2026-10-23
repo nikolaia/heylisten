@@ -73,8 +73,19 @@ pub fn import(src: &Path, dest: &Path) -> Result<f64> {
 }
 
 /// Reads a 16 kHz mono WAV written by heyListen into f32 samples.
+///
+/// A recorder that was killed (a crash, Force Quit) leaves its files unfinished: empty, or with
+/// a header that counts fewer samples than were written after it. heyListen only ever appends,
+/// so in its own files everything after the header is audio, whatever the header says.
 pub fn read(path: &Path) -> Result<Vec<f32>> {
-    let reader = hound::WavReader::open(path).with_context(|| format!("can't open {}", path.display()))?;
+    let bytes = std::fs::read(path).with_context(|| format!("can't open {}", path.display()))?;
+    if bytes.len() <= OWN_HEADER {
+        return Ok(Vec::new()); // created, but killed before anything was written
+    }
+    if is_own_wav(&bytes) {
+        return Ok(bytes[OWN_HEADER..].as_chunks::<2>().0.iter().map(|b| i16::from_le_bytes(*b) as f32 / i16::MAX as f32).collect());
+    }
+    let reader = hound::WavReader::new(std::io::Cursor::new(bytes)).with_context(|| format!("can't open {}", path.display()))?;
     let spec = reader.spec();
     if spec.sample_rate != SAMPLE_RATE || spec.channels != 1 {
         bail!("{} is not 16 kHz mono", path.display());
@@ -83,6 +94,25 @@ pub fn read(path: &Path) -> Result<Vec<f32>> {
         .into_samples::<i16>()
         .map(|s| Ok(s? as f32 / i16::MAX as f32))
         .collect()
+}
+
+/// heyListen's own WAV files: a 44-byte header, then 16 kHz mono 16-bit samples.
+const OWN_HEADER: usize = 44;
+
+/// Whether the file has exactly the layout `WavWriter` writes. Other WAVs (from ffmpeg, say)
+/// may have more chunks before the audio, so they go through the full parser.
+fn is_own_wav(bytes: &[u8]) -> bool {
+    let u16_at = |i: usize| u16::from_le_bytes([bytes[i], bytes[i + 1]]);
+    let u32_at = |i: usize| u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
+    bytes.len() > OWN_HEADER
+        && &bytes[0..4] == b"RIFF"
+        && &bytes[8..16] == b"WAVEfmt "
+        && u32_at(16) == 16
+        && u16_at(20) == 1 // PCM
+        && u16_at(22) == 1 // mono
+        && u32_at(24) == SAMPLE_RATE
+        && u16_at(34) == 16
+        && &bytes[36..40] == b"data"
 }
 
 /// 20 ms analysis frames.
@@ -234,5 +264,53 @@ mod tests {
         rs.finish(&mut out).unwrap();
         let expected = 16_000 * 3;
         assert_eq!(out.len(), expected);
+    }
+
+    /// A WAV as `WavWriter` writes it, with the header's sizes as given (a killed recorder
+    /// leaves them at 0 or out of date).
+    fn own_wav(samples: &[i16], header_samples: u32) -> Vec<u8> {
+        let data = header_samples * 2;
+        let mut b = Vec::new();
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&(36 + data).to_le_bytes());
+        b.extend_from_slice(b"WAVEfmt ");
+        b.extend_from_slice(&16u32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&SAMPLE_RATE.to_le_bytes());
+        b.extend_from_slice(&(SAMPLE_RATE * 2).to_le_bytes());
+        b.extend_from_slice(&2u16.to_le_bytes());
+        b.extend_from_slice(&16u16.to_le_bytes());
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&data.to_le_bytes());
+        for s in samples {
+            b.extend_from_slice(&s.to_le_bytes());
+        }
+        b
+    }
+
+    #[test]
+    fn reads_what_a_killed_recorder_left() {
+        let dir = std::env::temp_dir().join(format!("heylisten-audio-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = |name: &str, bytes: &[u8]| {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            read(&path).unwrap().len()
+        };
+        assert_eq!(file("empty.wav", b""), 0, "created, nothing written");
+        assert_eq!(file("header-only.wav", &own_wav(&[], 0)[..44]), 0);
+        assert_eq!(file("stale-header.wav", &own_wav(&[100, -100, 200, -200], 0)), 4, "the header says 0, four were written");
+        assert_eq!(file("older-header.wav", &own_wav(&[1, 2, 3, 4, 5, 6], 2)), 6);
+
+        // A file WavWriter finished properly reads the same as before.
+        let path = dir.join("finished.wav");
+        let mut w = WavWriter::create(&path).unwrap();
+        w.write(&[0.5, -0.5, 0.25]).unwrap();
+        w.finish().unwrap();
+        let samples = read(&path).unwrap();
+        assert_eq!(samples.len(), 3);
+        assert!((samples[0] - 0.5).abs() < 1e-3 && (samples[1] + 0.5).abs() < 1e-3);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

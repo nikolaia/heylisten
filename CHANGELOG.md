@@ -11,6 +11,7 @@ What changed in each release. Each release's GitHub page shows its section from 
 
 ### Fixed
 - **The menu bar icon no longer vanishes when a recording starts.** On a MacBook with a camera notch and a full menu bar, the timer next to the icon made it wider, and macOS hid it behind the notch. The timer is now only in the menu. Opening heyListen while it runs now shows what it's doing, with a way to stop the recording, in case the icon is hidden anyway.
+- **A recording that was force-quit can be finished.** Its audio files were left unfinished (an empty file, or a header that hadn't caught up), and finishing the meeting failed on them. heyListen now reads whatever audio was written. A meeting where nobody spoke says so, instead of claiming its audio was deleted.
 - **A recording that stopped unexpectedly no longer leaves the menu stuck.** The menu says what happened and offers to finish the meeting (Start waits until then), instead of disabling Stop. The menu bar app also logs its own errors and crashes to `tray.log` in heyListen's data folder.
 - **Others sounding like a duck with AirPods.** In call mode, AirPods run at 24 kHz while the system audio tap reported 48 kHz, so other participants were recorded at double speed and transcribed as "kvakk kvakk". heyListen now uses the device's real rate and checks it against how fast audio arrives.
 - **Security:** rustls 0.23.46, rustls-webpki 0.103.16 and webpki-roots 1.0.11, for advisories in the libraries behind heyListen's HTTPS downloads (RUSTSEC-2026-0346 to -0349, -0381, -0382).
