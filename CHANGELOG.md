@@ -2,6 +2,11 @@
 
 What changed in each release. Each release's GitHub page shows its section from this file.
 
+## [Unreleased]
+
+### Added
+- **Homebrew:** `brew install --cask nikolaia/heylisten/heylisten`, and `brew upgrade --cask heylisten` for updates. The [tap](https://github.com/nikolaia/homebrew-heylisten) follows releases on its own, and only moves to a release whose zip matches its checksum and was built by this repo's release workflow.
+
 ## [0.1.1] - 2026-10-23
 
 Fixes from the first round of testing by colleagues, and meeting titles.

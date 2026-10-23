@@ -57,8 +57,12 @@ Hei og velkommen, skal vi starte med budsjettet?
 
 ## 🚀 Getting started
 
-1. **[Download heyListen](https://github.com/nikolaia/heylisten/releases/latest/download/heyListen-macos-arm64.zip)**, unzip it, and move **heyListen.app** to *Applications*.
-2. **Open it.** The app isn't notarized by Apple yet, so macOS blocks it the first time. Go to System Settings → Privacy & Security, scroll down and click **Open Anyway**. You only do this once.
+1. **Install it** with [Homebrew](https://brew.sh), which also gives you updates and the `heylisten` command:
+   ```bash
+   brew install --cask nikolaia/heylisten/heylisten     # update later: brew upgrade --cask heylisten
+   ```
+   Or **[download heyListen](https://github.com/nikolaia/heylisten/releases/latest/download/heyListen-macos-arm64.zip)**, unzip it, and move **heyListen.app** to *Applications*.
+2. **Open it from Applications.** The app isn't notarized by Apple yet, so macOS blocks it the first time. Go to System Settings → Privacy & Security, scroll down and click **Open Anyway**. Do this once for each new version, before using the `heylisten` command: until then macOS blocks that too.
 3. Click the **ring ◯ in your menu bar** and choose **Download models (~8.4 GB)…**. This fetches the Norwegian speech model (1.1 GB), the summary engine (12 MB) and the Norwegian summary model (7.3 GB). Progress is shown in the menu. If Ollama already has Borealis, heyListen uses that copy and skips the 7.3 GB.
 4. Choose **Start recording**. On the first recording, macOS asks for permission to use the **microphone** and to **record system audio**. Allow both.
 
@@ -78,7 +82,7 @@ To have heyListen start with your Mac, add it under System Settings → General 
 The app bundles a `heylisten` CLI that does the same things, which is handy for hotkeys (Raycast, Alfred) or for importing files:
 
 ```bash
-alias heylisten=/Applications/heyListen.app/Contents/MacOS/heylisten
+alias heylisten=/Applications/heyListen.app/Contents/MacOS/heylisten   # not needed with Homebrew
 
 heylisten start [title]        # record in the background and show the live transcript (no title: the summary names it)
                                # (Ctrl+C closes the view; recording continues)
