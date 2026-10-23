@@ -18,7 +18,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 use heylisten::config::{Config, SummaryEngine};
 use heylisten::meeting::Meeting;
-use heylisten::pipeline::{self, Event as PipelineEvent};
+use heylisten::pipeline::{self, Event as PipelineEvent, Mode};
 use heylisten::recorder::{self, Status};
 use heylisten::setup::{self, Needs, Progress};
 
@@ -39,6 +39,9 @@ enum State {
     Idle,
     Starting,
     Recording(Meeting),
+    /// The recorder stopped without being asked (a crash); its audio is saved. Stop finishes
+    /// the meeting, and a new recording waits until then.
+    Died(Meeting),
     /// Making the note after stop, or downloading models. `String` is the current step.
     Busy(String),
 }
@@ -50,6 +53,8 @@ struct Items {
     install_ollama: MenuItem,
     start: MenuItem,
     stop: MenuItem,
+    /// Stop with only the transcript: no speakers, names or summary.
+    stop_quick: MenuItem,
     recent: Submenu,
     summary: Submenu,
     notes_dir: MenuItem,
@@ -90,7 +95,30 @@ enum Look {
     Busy,
 }
 
+/// The tray's own log, for what would otherwise vanish with the menu bar icon: startup errors,
+/// failed actions, crashes. Errors only, never meeting content.
+fn log(message: &str) {
+    use std::io::Write as _;
+    let path = heylisten::config::data_dir().join("tray.log");
+    // Kept small: start over past 1 MB.
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 1_000_000) {
+        let _ = std::fs::remove_file(&path);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "[{}] {message}", Local::now().format("%Y-%m-%d %H:%M:%S"));
+    }
+}
+
 fn main() -> Result<()> {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log(&format!("crashed: {info}"));
+        default_hook(info);
+    }));
+    run().inspect_err(|e| log(&format!("couldn't start: {e:#}")))
+}
+
+fn run() -> Result<()> {
     let mut config = Config::load()?;
     // `start` launches the recorder through the CLI binary, which sits next to this one.
     let cli = std::env::current_exe()?.with_file_name("heylisten");
@@ -118,6 +146,7 @@ fn main() -> Result<()> {
         install_ollama: MenuItem::new("Install Ollama (for summaries)…", true, None),
         start: MenuItem::new("Start recording", false, None),
         stop: MenuItem::new("Stop recording", false, None),
+        stop_quick: MenuItem::new("Stop without summary", false, None),
         recent: Submenu::new("Recent notes", false),
         summary: Submenu::new("Summary model", true),
         notes_dir: MenuItem::new("Set notes location…", true, None),
@@ -130,6 +159,7 @@ fn main() -> Result<()> {
         &PredefinedMenuItem::separator(),
         &items.start,
         &items.stop,
+        &items.stop_quick,
         &PredefinedMenuItem::separator(),
         &items.recent,
         &items.summary,
@@ -183,9 +213,10 @@ fn main() -> Result<()> {
                     t.state = State::Starting;
                     t.error = None;
                     spawn_start(cli.clone(), proxy.clone());
-                } else if id == t.items.stop.id() {
+                } else if id == t.items.stop.id() || id == t.items.stop_quick.id() {
+                    let mode = if id == t.items.stop.id() { Mode::Full } else { Mode::TranscriptOnly };
                     t.state = State::Busy("Stopping…".into());
-                    spawn_stop(config.clone(), proxy.clone());
+                    spawn_stop(config.clone(), mode, proxy.clone());
                 } else if id == t.items.download.id() {
                     t.state = State::Busy("Starting download…".into());
                     t.error = None;
@@ -230,6 +261,7 @@ fn main() -> Result<()> {
                 match result {
                     Ok(meeting) => t.state = State::Recording(meeting),
                     Err(e) => {
+                        log(&format!("start failed: {e}"));
                         t.state = State::Idle;
                         t.error = Some(e);
                     }
@@ -250,7 +282,10 @@ fn main() -> Result<()> {
                         t.set_recent(recent);
                     }
                     Ok(None) => {}
-                    Err(e) => t.error = Some(e),
+                    Err(e) => {
+                        log(&e);
+                        t.error = Some(e);
+                    }
                 }
             }
             _ => {}
@@ -275,13 +310,16 @@ fn main() -> Result<()> {
 impl Tray {
     /// Follows recordings started or stopped elsewhere (the CLI), then redraws.
     fn refresh(&mut self, config: &Config) {
-        if matches!(self.state, State::Idle | State::Recording(_)) {
-            self.state = match recorder::status() {
+        if matches!(self.state, State::Idle | State::Recording(_) | State::Died(_)) {
+            let status = recorder::status();
+            if let Ok(Status::Died { meeting }) = &status
+                && !matches!(&self.state, State::Died(m) if m.id == meeting.id)
+            {
+                log(&format!("recorder for {} stopped unexpectedly; see recorder.log in its meeting folder", meeting.id));
+            }
+            self.state = match status {
                 Ok(Status::Recording { meeting, .. }) => State::Recording(meeting),
-                Ok(Status::Died { meeting }) => {
-                    self.error = Some(format!("Recorder died: finish '{}' with heylisten stop", meeting.title));
-                    State::Idle
-                }
+                Ok(Status::Died { meeting }) => State::Died(meeting),
                 _ => State::Idle,
             };
         }
@@ -306,6 +344,7 @@ impl Tray {
                 let elapsed = format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60);
                 (format!("Recording '{}' · {elapsed}", m.title), Some(elapsed))
             }
+            State::Died(m) => (format!("Recording '{}' stopped unexpectedly. The audio so far is saved", m.title), None),
             State::Busy(step) => (step.clone(), None),
         };
         set_text(&self.items.status, &text);
@@ -314,7 +353,15 @@ impl Tray {
             self.title = title;
         }
         set_enabled(&self.items.start, idle && !needs_speech);
-        set_enabled(&self.items.stop, matches!(self.state, State::Recording(_)));
+        let stoppable = matches!(self.state, State::Recording(_) | State::Died(_));
+        set_enabled(&self.items.stop, stoppable);
+        set_enabled(&self.items.stop_quick, stoppable);
+        let (stop, quick) = match &self.state {
+            State::Died(m) => (format!("Finish '{}' (make its note)", m.title), "Finish without summary"),
+            _ => ("Stop recording".into(), "Stop without summary"),
+        };
+        set_text(&self.items.stop, &stop);
+        set_text(&self.items.stop_quick, quick);
 
         // Setup items appear only while something is missing.
         if let Some(n) = &self.needs {
@@ -334,7 +381,7 @@ impl Tray {
         let look = match self.state {
             State::Recording(_) => Look::Recording,
             State::Starting | State::Busy(_) => Look::Busy,
-            State::Idle => Look::Idle,
+            State::Idle | State::Died(_) => Look::Idle,
         };
         let frames = match look {
             Look::Idle => None,
@@ -462,7 +509,7 @@ fn spawn_start(cli: PathBuf, proxy: EventLoopProxy<UserEvent>) {
     });
 }
 
-fn spawn_stop(config: Config, proxy: EventLoopProxy<UserEvent>) {
+fn spawn_stop(config: Config, mode: Mode, proxy: EventLoopProxy<UserEvent>) {
     thread::spawn(move || {
         let result = (|| -> Result<PathBuf> {
             let meeting = recorder::stop().context("couldn't stop")?;
@@ -477,7 +524,7 @@ fn spawn_stop(config: Config, proxy: EventLoopProxy<UserEvent>) {
                 };
                 let _ = p.send_event(UserEvent::Busy(step.into()));
             });
-            pipeline::process(&meeting, &config, true, on_event)
+            pipeline::process(&meeting, &config, true, mode, on_event)
         })();
         let _ = proxy.send_event(UserEvent::Done(result.map(Some).map_err(|e| format!("{e:#}"))));
     });

@@ -11,7 +11,7 @@ use heylisten::doctor::{self, Status};
 use heylisten::live;
 use heylisten::transcript::Who;
 use heylisten::meeting::Meeting;
-use heylisten::pipeline::{self, Event};
+use heylisten::pipeline::{self, Event, Mode};
 use heylisten::recorder::{self, Status as RecorderStatus};
 use heylisten::setup;
 
@@ -31,7 +31,11 @@ enum Command {
         title: Option<String>,
     },
     /// Stop recording, then write the transcript, summary and note
-    Stop,
+    Stop {
+        /// Only the transcript: skip speakers, names and the summary
+        #[arg(long)]
+        transcript_only: bool,
+    },
     /// Show whether a meeting is being recorded
     Status,
     /// Follow the live transcript of the meeting being recorded
@@ -68,7 +72,7 @@ fn main() -> ExitCode {
     let result = Config::load().and_then(|config| match cli.command {
         Command::Start { title } => start(title),
         Command::Watch => watch(),
-        Command::Stop => stop(&config),
+        Command::Stop { transcript_only } => stop(&config, if transcript_only { Mode::TranscriptOnly } else { Mode::Full }),
         Command::Status => status(),
         Command::Record { meeting } => recorder::run(&config, &meeting).map(|_| ExitCode::SUCCESS),
         Command::Launch { .. } => unreachable!(),
@@ -121,12 +125,12 @@ fn watch() -> Result<ExitCode> {
     }
 }
 
-fn stop(config: &Config) -> Result<ExitCode> {
+fn stop(config: &Config, mode: Mode) -> Result<ExitCode> {
     eprintln!("Stopping (finishing the live transcript)…");
     let meeting = recorder::stop()?;
     eprintln!("Stopped '{}' ({})", meeting.title, meeting.id);
     let id = meeting.id.clone();
-    pipeline::process(&meeting, config, true, Arc::new(move |e| print_event(&id, e)))?;
+    pipeline::process(&meeting, config, true, mode, Arc::new(move |e| print_event(&id, e)))?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -140,7 +144,7 @@ fn status() -> Result<ExitCode> {
         }
         RecorderStatus::Died { meeting } => {
             println!("{} '{}' ({})", red("Recorder died while recording"), meeting.title, meeting.id);
-            println!("The audio so far is saved. Finish it with: heylisten stop");
+            println!("The audio so far is saved. Finish it with: heylisten stop (or stop --transcript-only)");
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -155,7 +159,7 @@ fn process(config: &Config, target: &str) -> Result<ExitCode> {
     };
     eprintln!("Meeting {} ({})", meeting.id, meeting.title);
     let id = meeting.id.clone();
-    pipeline::process(&meeting, config, false, Arc::new(move |e| print_event(&id, e)))?;
+    pipeline::process(&meeting, config, false, Mode::Full, Arc::new(move |e| print_event(&id, e)))?;
     Ok(ExitCode::SUCCESS)
 }
 

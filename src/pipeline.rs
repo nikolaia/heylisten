@@ -43,9 +43,19 @@ pub enum Event {
 
 pub type OnEvent = Arc<dyn Fn(Event) + Send + Sync>;
 
+/// How much of the note to make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Transcript, speakers, names and summary.
+    Full,
+    /// Only the transcript, with Me and Others: done in seconds once the live transcript is
+    /// complete. The audio goes as after a full note (kept only with keep_audio or debug).
+    TranscriptOnly,
+}
+
 /// Turns a recorded meeting into a note. With `reuse_live`, a complete live transcript is used
 /// as is; otherwise everything is transcribed again from the saved audio. Returns the note's path.
-pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, on_event: OnEvent) -> Result<PathBuf> {
+pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, mode: Mode, on_event: OnEvent) -> Result<PathBuf> {
     let mut tracks = Vec::new();
     for track in Track::ALL {
         let path = meeting.track_path(track);
@@ -97,6 +107,10 @@ pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, on_event: O
         on_event(Event::Took("transcription", started.elapsed()));
         Transcript::merge(segments)
     };
+    if mode == Mode::TranscriptOnly {
+        return write_note(&meeting, &transcript, None, true, config, &on_event);
+    }
+
     // Tell speakers apart: the Others first, then any room full of people on the mic.
     let mut transcript = transcript;
     let mut others = 0;
@@ -145,19 +159,27 @@ pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, on_event: O
     .inspect_err(|e| on_event(Event::SummaryFailed(format!("{e:#}"))))
     .ok();
     on_event(Event::Took("names and summary", started.elapsed()));
-    fs::write(meeting.dir().join("transcript.json"), serde_json::to_string_pretty(&transcript)?)?;
+    // A failed summary keeps the audio, so `heylisten process` can retry it.
+    let complete = summary.is_some();
+    write_note(&meeting, &transcript, summary.as_ref(), complete, config, &on_event)
+}
+
+/// Saves the transcript, writes the note and records it on the meeting. Then deletes the audio
+/// if the note is `complete`, unless it's kept anyway (keep_audio, debug), for at most
+/// AUDIO_KEPT_DAYS.
+fn write_note(meeting: &Meeting, transcript: &Transcript, summary: Option<&Summary>, complete: bool, config: &Config, on_event: &OnEvent) -> Result<PathBuf> {
+    fs::write(meeting.dir().join("transcript.json"), serde_json::to_string_pretty(transcript)?)?;
 
     let model_name = config.whisper_model.file_stem().and_then(|s| s.to_str()).unwrap_or("whisper");
-    let contents = note::render(&meeting, &transcript, model_name, summary.as_ref());
-    let note_path = note::write(&config.notes_dir, &meeting, &contents)?;
+    let contents = note::render(meeting, transcript, model_name, summary);
+    let note_path = note::write(&config.notes_dir, meeting, &contents)?;
     let mut done = meeting.clone();
     done.note = Some(note_path.clone());
     done.save()?;
     on_event(Event::NoteWritten(note_path.clone()));
 
-    // Kept audio (keep_audio, debug, or a failed summary to retry) goes after AUDIO_KEPT_DAYS.
     Meeting::prune_old_audio();
-    if !config.keep_audio && !config.debug && summary.is_some() {
+    if complete && !config.keep_audio && !config.debug {
         for file in crate::meeting::AUDIO_FILES {
             let _ = fs::remove_file(meeting.dir().join(file));
         }

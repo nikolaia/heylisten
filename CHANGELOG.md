@@ -6,10 +6,12 @@ What changed in each release. Each release's GitHub page shows its section from 
 
 ### Added
 - **Meeting titles:** the summary model names each meeting ("Planlegging av høstlanseringen"), and the note is called that instead of "Møte 08:46". A title you give when starting is kept. An unedited summary prompt from an earlier version is updated to ask for the title; an edited one is left alone.
+- **Stop without summary** in the menu (`heylisten stop --transcript-only`): just the transcript, in seconds.
 
 ### Fixed
+- **A recording that stopped unexpectedly no longer leaves the menu stuck.** The menu says what happened and offers to finish the meeting (Start waits until then), instead of disabling Stop. The menu bar app also logs its own errors and crashes to `tray.log` in heyListen's data folder.
 - **Others sounding like a duck with AirPods.** In call mode, AirPods run at 24 kHz while the system audio tap reported 48 kHz, so other participants were recorded at double speed and transcribed as "kvakk kvakk". heyListen now uses the device's real rate and checks it against how fast audio arrives.
-- **Security:** rustls 0.23.46, for four advisories in the library behind heyListen's HTTPS downloads (RUSTSEC-2026-0346 to -0349).
+- **Security:** rustls 0.23.46, rustls-webpki 0.103.16 and webpki-roots 1.0.11, for advisories in the libraries behind heyListen's HTTPS downloads (RUSTSEC-2026-0346 to -0349, -0381, -0382).
 
 ## [0.1.0] - 2026-10-02
 

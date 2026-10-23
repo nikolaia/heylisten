@@ -85,6 +85,7 @@ heylisten start [title]        # record in the background and show the live tran
 heylisten watch                # re-attach the live view
 heylisten status               # recording or idle
 heylisten stop                 # stop and write the note
+heylisten stop --transcript-only   # stop with just the transcript: no speakers, names or summary
 heylisten process memo.m4a     # transcribe an audio file (m4a, mp3, wav, flac, ogg)
 heylisten process <meeting-id> # redo a meeting from its saved audio
 heylisten setup                # download the models and the summary engine
