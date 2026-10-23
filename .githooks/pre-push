@@ -1,0 +1,8 @@
+#!/bin/sh
+# Runs scripts/check.sh before every push, so main doesn't go red in CI.
+# Enable once per clone: git config core.hooksPath .githooks   (skip once: git push --no-verify)
+cd "$(git rev-parse --show-toplevel)" || exit 1
+if command -v cargo-audit > /dev/null; then
+    exec scripts/check.sh
+fi
+exec nix develop --quiet -c scripts/check.sh
