@@ -1,6 +1,7 @@
 //! Diarization: tells the Others apart. Runs on the system track after the meeting.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::ffi::CString;
 use std::fs;
 use std::path::PathBuf;
 
@@ -60,7 +61,6 @@ impl Default for Clustering {
 /// `diarize` with explicit clustering settings, for tuning.
 pub fn diarize_with(samples: &[f32], clustering: Clustering, debug: bool) -> Result<Vec<Turn>> {
     use sherpa_rs::sherpa_rs_sys as sys;
-    use std::ffi::CString;
 
     let path = |p: PathBuf| CString::new(p.to_string_lossy().as_bytes()).context("bad model path");
     let segmentation = path(model_file("segmentation.onnx", SEGMENTATION)?)?;
@@ -121,10 +121,7 @@ pub fn diarize_with(samples: &[f32], clustering: Clustering, debug: bool) -> Res
 /// two speakers if their voices are clearly the same, a small one into a bigger one at a lower
 /// bar. A speaker too short to measure goes to whoever spoke right next to it. The voices exist
 /// only here, in memory.
-fn merge_speakers(samples: &[f32], turns: &mut [Turn], clustering: Clustering, model: &std::ffi::CString) -> Result<()> {
-    use sherpa_rs::sherpa_rs_sys as sys;
-    use std::collections::BTreeMap;
-
+fn merge_speakers(samples: &[f32], turns: &mut [Turn], clustering: Clustering, model: &CString) -> Result<()> {
     if clustering.merge_similarity > 1.0 && clustering.small_similarity > 1.0 {
         return Ok(());
     }
@@ -132,44 +129,7 @@ fn merge_speakers(samples: &[f32], turns: &mut [Turn], clustering: Clustering, m
     for t in turns.iter() {
         *speech.entry(t.speaker).or_default() += (t.end_ms - t.start_ms) as f32 / 1000.0;
     }
-    let provider = std::ffi::CString::new("cpu")?;
-    let config = sys::SherpaOnnxSpeakerEmbeddingExtractorConfig { model: model.as_ptr(), num_threads: THREADS, debug: 0, provider: provider.as_ptr() };
-    let mut voices: BTreeMap<i32, Vec<f32>> = BTreeMap::new();
-    unsafe {
-        let extractor = sys::SherpaOnnxCreateSpeakerEmbeddingExtractor(&config);
-        if extractor.is_null() {
-            bail!("couldn't load the speaker embedding model");
-        }
-        let dim = sys::SherpaOnnxSpeakerEmbeddingExtractorDim(extractor) as usize;
-        for &speaker in speech.keys() {
-            // Up to 60 s of the speaker's longest turns.
-            let mut own: Vec<&Turn> = turns.iter().filter(|t| t.speaker == speaker).collect();
-            own.sort_by_key(|t| std::cmp::Reverse(t.end_ms - t.start_ms));
-            let mut audio = Vec::new();
-            for t in own {
-                let (s, e) = ((t.start_ms * 16) as usize, ((t.end_ms * 16) as usize).min(samples.len()));
-                audio.extend_from_slice(&samples[s.min(e)..e]);
-                if audio.len() >= 16_000 * 60 {
-                    break;
-                }
-            }
-            if audio.len() < 16_000 {
-                continue; // too short to measure
-            }
-            let stream = sys::SherpaOnnxSpeakerEmbeddingExtractorCreateStream(extractor);
-            sys::SherpaOnnxOnlineStreamAcceptWaveform(stream, 16_000, audio.as_ptr(), audio.len() as i32);
-            sys::SherpaOnnxOnlineStreamInputFinished(stream);
-            if sys::SherpaOnnxSpeakerEmbeddingExtractorIsReady(extractor, stream) != 0 {
-                let v = sys::SherpaOnnxSpeakerEmbeddingExtractorComputeEmbedding(extractor, stream);
-                if !v.is_null() {
-                    voices.insert(speaker, normalized(std::slice::from_raw_parts(v, dim)));
-                    sys::SherpaOnnxSpeakerEmbeddingExtractorDestroyEmbedding(v);
-                }
-            }
-            sys::SherpaOnnxDestroyOnlineStream(stream);
-        }
-        sys::SherpaOnnxDestroySpeakerEmbeddingExtractor(extractor);
-    }
+    let mut voices = voices(samples, turns, model)?;
 
     let mut into: BTreeMap<i32, i32> = BTreeMap::new();
     loop {
@@ -206,7 +166,7 @@ fn merge_speakers(samples: &[f32], turns: &mut [Turn], clustering: Clustering, m
         t.speaker = resolve(t.speaker);
     }
     // Speakers too short to measure: whoever spoke right before (or after) them.
-    let measured: std::collections::BTreeSet<i32> = voices.keys().copied().collect();
+    let measured: BTreeSet<i32> = voices.keys().copied().collect();
     for i in 0..turns.len() {
         if !measured.contains(&turns[i].speaker) {
             let neighbour = turns[..i].iter().rev().chain(turns[i + 1..].iter()).find(|t| measured.contains(&t.speaker)).map(|t| t.speaker);
@@ -216,6 +176,52 @@ fn merge_speakers(samples: &[f32], turns: &mut [Turn], clustering: Clustering, m
         }
     }
     Ok(())
+}
+
+/// Each speaker's voice: a normalized CAM++ embedding of up to 60 s of their longest turns.
+/// Speakers with under 1 s of speech are left out, as too short to measure.
+fn voices(samples: &[f32], turns: &[Turn], model: &CString) -> Result<BTreeMap<i32, Vec<f32>>> {
+    use sherpa_rs::sherpa_rs_sys as sys;
+
+    let speakers: BTreeSet<i32> = turns.iter().map(|t| t.speaker).collect();
+    let provider = CString::new("cpu")?;
+    let config = sys::SherpaOnnxSpeakerEmbeddingExtractorConfig { model: model.as_ptr(), num_threads: THREADS, debug: 0, provider: provider.as_ptr() };
+    let mut voices = BTreeMap::new();
+    unsafe {
+        let extractor = sys::SherpaOnnxCreateSpeakerEmbeddingExtractor(&config);
+        if extractor.is_null() {
+            bail!("couldn't load the speaker embedding model");
+        }
+        let dim = sys::SherpaOnnxSpeakerEmbeddingExtractorDim(extractor) as usize;
+        for speaker in speakers {
+            let mut own: Vec<&Turn> = turns.iter().filter(|t| t.speaker == speaker).collect();
+            own.sort_by_key(|t| std::cmp::Reverse(t.end_ms - t.start_ms));
+            let mut audio = Vec::new();
+            for t in own {
+                let (s, e) = ((t.start_ms * 16) as usize, ((t.end_ms * 16) as usize).min(samples.len()));
+                audio.extend_from_slice(&samples[s.min(e)..e]);
+                if audio.len() >= 16_000 * 60 {
+                    break;
+                }
+            }
+            if audio.len() < 16_000 {
+                continue;
+            }
+            let stream = sys::SherpaOnnxSpeakerEmbeddingExtractorCreateStream(extractor);
+            sys::SherpaOnnxOnlineStreamAcceptWaveform(stream, 16_000, audio.as_ptr(), audio.len() as i32);
+            sys::SherpaOnnxOnlineStreamInputFinished(stream);
+            if sys::SherpaOnnxSpeakerEmbeddingExtractorIsReady(extractor, stream) != 0 {
+                let v = sys::SherpaOnnxSpeakerEmbeddingExtractorComputeEmbedding(extractor, stream);
+                if !v.is_null() {
+                    voices.insert(speaker, normalized(std::slice::from_raw_parts(v, dim)));
+                    sys::SherpaOnnxSpeakerEmbeddingExtractorDestroyEmbedding(v);
+                }
+            }
+            sys::SherpaOnnxDestroyOnlineStream(stream);
+        }
+        sys::SherpaOnnxDestroySpeakerEmbeddingExtractor(extractor);
+    }
+    Ok(voices)
 }
 
 fn normalized(v: &[f32]) -> Vec<f32> {
@@ -286,9 +292,8 @@ fn clusters(segments: &mut Vec<Segment>, turns: &[Turn], who: Who) -> Vec<Option
     let words: Vec<&Word> = segments.iter().filter(|s| s.who == who).flat_map(|s| &s.words).collect();
     let mut speakers: Vec<i32> = Vec::with_capacity(words.len());
     for w in &words {
-        let distance = |t: &Turn| t.start_ms.saturating_sub(w.at_ms) + w.at_ms.saturating_sub(t.end_ms.saturating_sub(1));
         let previous = speakers.last().copied();
-        speakers.push(turns.iter().min_by_key(|t| (distance(t), Some(t.speaker) != previous)).unwrap().speaker);
+        speakers.push(turns.iter().min_by_key(|t| (distance(t, w.at_ms), Some(t.speaker) != previous)).unwrap().speaker);
     }
     let ends: Vec<bool> = words.iter().map(|w| w.text.ends_with(['.', '?', '!', '…'])).collect();
     snap_to_sentences(&mut speakers, &ends);
@@ -315,6 +320,12 @@ fn clusters(segments: &mut Vec<Segment>, turns: &[Turn], who: Who) -> Vec<Option
     }
     *segments = split;
     out
+}
+
+/// How far `at_ms` is from a turn, in ms: 0 inside it.
+fn distance(t: &Turn, at_ms: u64) -> u64 {
+    let last_ms = t.end_ms.saturating_sub(1);
+    t.start_ms.saturating_sub(at_ms) + at_ms.saturating_sub(last_ms)
 }
 
 /// Splits a segment into runs of words by one speaker.
@@ -345,13 +356,12 @@ fn split_into_runs(s: Segment, speakers: Vec<i32>) -> Vec<(i32, Segment)> {
 /// speaker change ("Det var alt. Men | vi må ta budsjettet."). People change
 /// turns at the end of a sentence, so a change in mid-sentence moves to a sentence end at
 /// most `SNAP_WORDS` away, if there is one (the nearer one; backwards on a tie).
-fn snap_to_sentences(speakers: &mut [i32], ends_sentence: &[bool]) {
+fn snap_to_sentences(speakers: &mut [i32], ends: &[bool]) {
     const SNAP_WORDS: usize = 3;
-    let ends = |i: usize| ends_sentence[i];
     let n = speakers.len();
     let mut i = 1;
     while i < n {
-        if speakers[i] == speakers[i - 1] || ends(i - 1) {
+        if speakers[i] == speakers[i - 1] || ends[i - 1] {
             i += 1;
             continue;
         }
@@ -365,8 +375,8 @@ fn snap_to_sentences(speakers: &mut [i32], ends_sentence: &[bool]) {
             hi += 1;
         }
         let to = (1..=SNAP_WORDS).find_map(|k| {
-            let back = Some(i.saturating_sub(k)).filter(|b| *b > lo && ends(b - 1));
-            let forward = Some(i + k).filter(|b| *b <= hi && ends(b - 1));
+            let back = Some(i.saturating_sub(k)).filter(|b| *b > lo && ends[b - 1]);
+            let forward = Some(i + k).filter(|b| *b <= hi && ends[b - 1]);
             back.or(forward)
         });
         match to {

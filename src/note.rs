@@ -69,14 +69,13 @@ pub fn take_title(summary: &mut String) -> Option<String> {
     let title = title.trim_start_matches("Tittel:").trim().trim_matches(|c: char| "\"'«»*#_`.".contains(c)).trim().to_string();
     let rest: Vec<&str> = lines[..start].iter().chain(&lines[end..]).copied().collect();
     *summary = rest.join("\n").trim().to_string();
-    (!title.is_empty() && !title.contains('\n') && title.chars().count() <= MAX_TITLE).then_some(title)
+    (!title.is_empty() && title.chars().count() <= MAX_TITLE).then_some(title)
 }
 
 /// Whether a meeting still has the title it got when it started ("Møte 08:46"), so a title
 /// from the summary may replace it.
 pub fn has_default_title(meeting: &Meeting) -> bool {
-    let t = meeting.title.as_bytes();
-    meeting.title.starts_with("Møte ") && t.len() == "Møte 08:46".len() && t[t.len() - 3] == b':'
+    meeting.title.strip_prefix("Møte ").is_some_and(|time| chrono::NaiveTime::parse_from_str(time, "%H:%M").is_ok())
 }
 
 /// Models don't always write tasks as `- [ ]`; make every list item under "## Oppgaver" one.
