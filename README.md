@@ -59,7 +59,7 @@ Hei og velkommen, skal vi starte med budsjettet?
 
 1. **Install it** with [Homebrew](https://brew.sh), which also gives you updates and the `heylisten` command:
    ```bash
-   brew install --cask nikolaia/heylisten/heylisten     # update later: brew upgrade --cask heylisten
+   brew install --cask nikolaia/tap/heylisten     # update later: brew upgrade --cask heylisten
    ```
    Or **[download heyListen](https://github.com/nikolaia/heylisten/releases/latest/download/heyListen-macos-arm64.zip)**, unzip it, and move **heyListen.app** to *Applications*.
 2. **Open it from Applications.** The app isn't notarized by Apple yet, so macOS blocks it the first time. Go to System Settings → Privacy & Security, scroll down and click **Open Anyway**. Do this once for each new version, before using the `heylisten` command: until then macOS blocks that too.
