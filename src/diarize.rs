@@ -415,7 +415,7 @@ fn label(segments: &mut [Segment], clusters: &[Option<i32>], first: u32) -> u32 
 }
 
 /// sherpa-onnx wants model files: unpack the embedded ones next to the meetings.
-fn model_file(name: &str, bytes: &[u8]) -> Result<PathBuf> {
+pub(crate) fn model_file(name: &str, bytes: &[u8]) -> Result<PathBuf> {
     let path = models_dir().join(name);
     if fs::metadata(&path).map(|m| m.len()).ok() != Some(bytes.len() as u64) {
         fs::create_dir_all(path.parent().unwrap())?;

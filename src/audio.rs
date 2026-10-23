@@ -117,8 +117,6 @@ fn is_own_wav(bytes: &[u8]) -> bool {
 
 /// 20 ms analysis frames.
 pub const FRAME: usize = SAMPLE_RATE as usize / 50;
-/// A frame louder than this probably contains speech.
-pub const SPEECH_RMS: f32 = 0.01;
 
 pub fn rms(samples: &[f32]) -> f32 {
     (samples.iter().map(|s| s * s).sum::<f32>() / samples.len().max(1) as f32).sqrt()
@@ -132,16 +130,7 @@ pub fn quietest_frame(samples: &[f32], from: usize, to: usize) -> usize {
         .unwrap_or(from)
 }
 
-/// Seconds of the audio that are loud enough to be speech.
-pub fn speech_seconds(samples: &[f32]) -> f32 {
-    samples.chunks(FRAME).filter(|f| rms(f) > SPEECH_RMS).count() as f32 * FRAME as f32 / SAMPLE_RATE as f32
-}
 
-/// True if at least 0.3 s of the audio is loud enough to be speech. Whisper invents text
-/// from near-silence, so anything else isn't worth transcribing.
-pub fn has_speech(samples: &[f32]) -> bool {
-    samples.chunks(FRAME).filter(|f| rms(f) > SPEECH_RMS).count() >= 15
-}
 
 /// Streaming 16 kHz mono WAV writer.
 pub struct WavWriter {

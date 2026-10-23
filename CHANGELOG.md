@@ -5,6 +5,7 @@ What changed in each release. Each release's GitHub page shows its section from 
 ## [Unreleased]
 
 ### Fixed
+- **Quiet mics are transcribed.** Speech was found by volume, so a quiet mic (a MacBook's built-in one at a distance, or an interface with low gain) was taken for silence and dropped. A voice detector (Silero VAD) now decides what's speech by how it sounds, and quiet speech is brought up to a normal level before transcribing. Music, typing and silence no longer reach the transcriber, which also makes transcription faster (about 14 s per minute of meeting instead of 19; live keeps up at 4× real time).
 - **No made-up meeting when nothing was said.** Starting and stopping a recording right away gave the summary model an empty transcript, and it invented a whole meeting. Now a recording where nobody spoke gets no note, and one with under 30 words gets the transcript without a summary. The summary prompt no longer has an example title for the model to copy; an unedited prompt is updated.
 
 ### Added

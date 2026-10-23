@@ -19,7 +19,7 @@ fn main() -> anyhow::Result<()> {
     let samples = audio::read(&meeting.track_path(track))?;
     let (s, e) = ((from * 60.0 * 16000.0) as usize, ((from + minutes) * 60.0 * 16000.0) as usize);
     let samples = &samples[s.min(samples.len())..e.min(samples.len())];
-    let mut chunker = Chunker::new(track);
+    let mut chunker = Chunker::new(track)?;
     let mut chunks = Vec::new();
     chunker.push(samples, &mut chunks);
     chunker.finish(&mut chunks);

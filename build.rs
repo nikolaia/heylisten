@@ -29,6 +29,13 @@ fn main() {
         );
         assert!(verified(&embedding, "aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2"));
     }
+    // Silero VAD v5 (MIT), as shipped by sherpa-onnx: tells speech from silence and noise.
+    let vad = out.join("vad.onnx");
+    if !verified(&vad, "6b99cbfd39246b6706f98ec13c7c50c6b299181f2474fa05cbc8046acc274396") {
+        download(&format!("{RELEASES}/asr-models/silero_vad_v5.onnx"), &vad);
+        assert!(verified(&vad, "6b99cbfd39246b6706f98ec13c7c50c6b299181f2474fa05cbc8046acc274396"));
+    }
+
     // DTLN-aec echo cancellation, 128 units (MIT, Nils L. Westhausen), as ONNX from Anarlog
     // (MIT, Fastrepl), pinned to a commit.
     const ANARLOG: &str = "https://raw.githubusercontent.com/fastrepl/anarlog/4d6187bb3559262d8fb650c5b4f5810171247396/crates/aec/data/models";

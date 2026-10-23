@@ -49,6 +49,7 @@ Hei og velkommen, skal vi starte med budsjettet?
 - 🔒 **Your meetings stay on your Mac.** Recording, transcription and summaries all run locally. The only downloads are the models, once, when you ask for them.
 - 🎙️ **Mic and system audio** recorded as two separate tracks. System audio is captured directly by macOS, so there's no BlackHole or virtual driver.
 - ⚡ **Live transcript** with [NB-Whisper](https://huggingface.co/NbAiLab/nb-whisper-large), the National Library of Norway's Whisper. By the time you stop, the transcript is already done.
+- 🎚️ **Hears quiet voices, ignores noise.** A voice detector ([Silero VAD](https://github.com/snakers4/silero-vad)) decides what's speech by how it sounds, not how loud it is: a quiet mic still works, and music, typing and silence never reach the transcriber.
 - 🗣️ **Tells speakers apart**, both remote people and several people sharing one mic in a meeting room.
 - 🔁 **Echo cancellation** ([DTLN-aec](https://github.com/breizhn/DTLN-aec)): what your speakers play is subtracted from your mic, so the others' voices and music don't become your lines, even without headphones.
 - 📝 **Norwegian summary** from [Borealis](https://huggingface.co/NbAiLab/borealis-12b-gguf), run by heyListen itself through llama.cpp, with no extra install. If you use [Ollama](https://ollama.com), you can pick any of its models instead. You get a summary, decisions, `- [ ]` tasks and topics, and the prompt is a file you can edit.
@@ -122,7 +123,7 @@ flowchart LR
     mic[🎙️ Mic] --> rec
     sys[🔊 System audio<br/>Core Audio tap] --> rec
     rec[Recorder<br/>background process] --> wav[(mic.wav<br/>system.wav)]
-    rec --> live[Live transcript<br/>NB-Whisper, chunked at pauses]
+    rec --> live[Live transcript<br/>voice detection + NB-Whisper]
     live --> view[Menu bar / heylisten watch]
     wav -- stop --> dia[Speakers<br/>pyannote + CAM++]
     live -- stop --> dia
@@ -132,7 +133,7 @@ flowchart LR
 
 - **Two tracks.** The mic is you (`Meg`) and system audio is everyone else (`Andre`), so the live view can tell them apart from the start.
 - **Echo.** Without headphones the mic hears the others through the speakers. The recorder cancels the system track out of the mic, sample-aligned, before anything is written or transcribed (about 2 % of one CPU core). Mic lines that still repeat what the system track said are dropped from the note too.
-- **Live.** Each track is cut into chunks at pauses and transcribed as you talk. After stop, only speaker labelling and the summary are left.
+- **Live.** A voice detector finds the speech on each track, which is cut into chunks of a few seconds and transcribed as you talk. Silence, music and noise are left out, and quiet speech is brought up to a normal level before transcribing. After stop, only speaker labelling and the summary are left.
 - **Speakers.** After stop, voices on both tracks are told apart and numbered `Taler 1`, `Taler 2`… in order of first appearance. If the mic hears only one voice, it stays `Meg`. In a meeting room where several people share a mic, every voice becomes a `Taler`, because heyListen can't know which one is you.
 - **Names.** When the meeting makes it clear who someone is, `Taler 2` becomes `Kari`. That means they introduce themselves ("dette er Kari"), or answer right after being addressed ("Kari, kan du…?"), or are thanked right after speaking ("Takk, Kari"). Code finds these and works out who is who; Borealis only confirms which words are names. Anything ambiguous stays `Taler N`. Each name is listed in the note's frontmatter with the label it replaced and the sentence it came from, so a wrong name is easy to fix by hand or by asking an LLM to replace it throughout. Names are found per meeting only, and nothing about anyone's voice is kept.
 - **Language.** Always Norwegian. NB-Whisper translates English speech into Norwegian rather than transcribing it.
@@ -152,7 +153,7 @@ Meetings (audio while recording, transcripts, metadata) are kept in `~/Library/A
 | NB-Whisper speech model (1.1 GB) | Hugging Face | SHA-256 pinned in the source |
 | Borealis summary model (7.3 GB) | Hugging Face | SHA-256 pinned in the source |
 | llama.cpp summary engine (12 MB) | llama.cpp's GitHub releases | SHA-256 pinned in the source |
-| Speaker-recognition models | GitHub (at build time) | SHA-256 pinned in `build.rs` |
+| Speaker-recognition and voice-detection models | GitHub (at build time) | SHA-256 pinned in `build.rs` |
 | Ollama models (Ollama engine only) | Your Ollama | Ollama's own digest checks |
 
 Downloads use HTTPS only, redirects included. A file that doesn't match its checksum is deleted, never used, so someone intercepting the connection (or a compromised mirror) can only make the download fail. Interrupted downloads resume, and the checksum covers the whole file, resumed part included. See [ADR 0004](docs/adr/0004-models-downloaded-on-request.md) and [ADR 0005](docs/adr/0005-built-in-summary-engine.md).
@@ -184,7 +185,7 @@ nix develop -c scripts/check.sh                         # what CI checks: tests,
 git config core.hooksPath .githooks                     # run check.sh before every push
 ```
 
-The build downloads sherpa-onnx and two small speaker-recognition models, which get embedded in the binary. Pushing a `v*` tag runs [the release workflow](.github/workflows/release.yml), which builds the app and attaches the zip to a GitHub Release.
+The build downloads sherpa-onnx and small speaker-recognition and voice-detection models, which get embedded in the binary. Pushing a `v*` tag runs [the release workflow](.github/workflows/release.yml), which builds the app and attaches the zip to a GitHub Release.
 
 **Debugging:** *Debug mode (keep recordings 7 days)* is on by default while heyListen is being tuned. Turn it off in the menu, or with `debug = false` in the config. It keeps each meeting's audio so `heylisten process <id>` can redo the note, and logs the devices, audio errors, how much audio each track receives, and the speaker turns to `recorder.log` in the meeting folder. **Kept audio is always deleted after 7 days**, whatever the settings; transcripts and notes stay.
 
@@ -194,7 +195,7 @@ The build downloads sherpa-onnx and two small speaker-recognition models, which 
 
 | For a 60-minute meeting | |
 |---|---|
-| Live transcription | keeps up at 3× real time (two tracks need 2×) |
+| Live transcription | keeps up at 4× real time (two tracks need 2×) |
 | After stop: speakers | ~4 min |
 | After stop: summary | ~30–60 s (one pass; meetings over ~2.5 h are summarized in parts) |
 | Peak memory | ~10 GB while summarizing (mostly the 7 GB summary model), ~1.6 GB while recording |
@@ -214,7 +215,7 @@ The build downloads sherpa-onnx and two small speaker-recognition models, which 
 
 - [NB-Whisper](https://huggingface.co/NbAiLab/nb-whisper-large) and [Borealis](https://huggingface.co/NbAiLab/borealis-12b-gguf) from the National Library of Norway.
 - [whisper.cpp](https://github.com/ggml-org/whisper.cpp) via [whisper-rs](https://crates.io/crates/whisper-rs).
-- [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) via [sherpa-rs](https://github.com/thewh1teagle/sherpa-rs), with [pyannote segmentation 3.0](https://huggingface.co/pyannote/segmentation-3.0) (MIT) and [3D-Speaker CAM++](https://github.com/modelscope/3D-Speaker) (Apache-2.0).
+- [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) via [sherpa-rs](https://github.com/thewh1teagle/sherpa-rs), with [pyannote segmentation 3.0](https://huggingface.co/pyannote/segmentation-3.0) (MIT), [3D-Speaker CAM++](https://github.com/modelscope/3D-Speaker) (Apache-2.0) and [Silero VAD](https://github.com/snakers4/silero-vad) (MIT).
 - Echo cancellation: [DTLN-aec](https://github.com/breizhn/DTLN-aec) by Nils L. Westhausen and Bernd T. Meyer (MIT), with processing adapted from [Anarlog](https://github.com/fastrepl/anarlog)'s `crates/aec` by Fastrepl (MIT), run with [tract](https://github.com/sonos/tract). Full notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 - [llama.cpp](https://github.com/ggml-org/llama.cpp), [tray-icon](https://github.com/tauri-apps/tray-icon), [rfd](https://github.com/PolyMeilex/rfd) and [Ollama](https://ollama.com).
 - Ideas from [vaqlo](https://github.com/ivshestakov/vaqlo.app).

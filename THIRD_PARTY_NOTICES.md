@@ -37,10 +37,11 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## Speaker recognition
+## Speaker recognition and voice detection
 
 - **pyannote segmentation 3.0** (MIT, CNRS), via sherpa-onnx: <https://huggingface.co/pyannote/segmentation-3.0>
 - **3D-Speaker CAM++** speaker embeddings (Apache-2.0): <https://github.com/modelscope/3D-Speaker>
+- **Silero VAD v5** voice activity detection (MIT, Silero Team), via sherpa-onnx: <https://github.com/snakers4/silero-vad>
 
 ## Models downloaded by `heylisten setup`
 

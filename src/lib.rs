@@ -19,3 +19,4 @@ pub mod setup;
 pub mod summarize;
 pub mod transcribe;
 pub mod transcript;
+pub mod vad;

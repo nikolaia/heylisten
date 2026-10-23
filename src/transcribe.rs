@@ -48,7 +48,8 @@ impl Transcriber {
 
     fn transcribe_checked(&mut self, samples: &[f32], offset_ms: u64, who: Who, splits_left: u32) -> Result<Vec<Segment>> {
         let segments = self.run(samples, offset_ms, who)?;
-        let speech = audio::speech_seconds(samples);
+        // Chunks hold speech only (the voice detector cut them), so their length is the speech.
+        let speech = samples.len() as f32 / audio::SAMPLE_RATE as f32;
         let words = word_count(&segments);
         if splits_left == 0 || speech < 2.0 || words as f32 >= speech * MIN_WORDS_PER_SPEECH_SECOND {
             return Ok(segments);
@@ -85,7 +86,7 @@ impl Transcriber {
         params.set_split_on_word(true);
         // Chunks are independent; carrying text over just leaks words between them.
         params.set_no_context(true);
-        state.full(params, samples)?;
+        state.full(params, &at_speaking_level(samples))?;
 
         // Whisper pads to 30 s and may report times in the padding.
         let len_ms = samples.len() as u64 * 1000 / audio::SAMPLE_RATE as u64;
@@ -119,6 +120,17 @@ impl Transcriber {
         }
         Ok(segments)
     }
+}
+
+/// Whisper hears very quiet speech (a low-gain mic) as no speech at all. Brings the loudest
+/// moment up to -6 dBFS, by at most 30 dB so a chunk of near-silence isn't turned into noise.
+/// Chunks only reach whisper when the voice detector heard speech in them.
+fn at_speaking_level(samples: &[f32]) -> Vec<f32> {
+    const TARGET_PEAK: f32 = 0.5;
+    const MAX_GAIN: f32 = 31.6; // 30 dB
+    let peak = samples.iter().fold(0f32, |m, s| m.max(s.abs()));
+    let gain = if peak > 0.0 { (TARGET_PEAK / peak).clamp(1.0, MAX_GAIN) } else { 1.0 };
+    samples.iter().map(|s| s * gain).collect()
 }
 
 /// Below this rate, whisper has probably skipped some of the speech. People speak about 2–3
@@ -161,5 +173,16 @@ mod tests {
         assert_eq!(strip_special_tokens(" <|nocaptions|>"), "");
         assert_eq!(strip_special_tokens("Hei <|no|> på deg"), "Hei på deg");
         assert_eq!(strip_special_tokens("Helt vanlig tekst."), "Helt vanlig tekst.");
+    }
+
+    #[test]
+    fn brings_quiet_speech_up_but_not_loud_speech_down() {
+        let quiet = [0.01, -0.02, 0.005];
+        let raised = at_speaking_level(&quiet);
+        assert!((raised[1] + 0.5).abs() < 1e-6, "the peak goes to -6 dBFS: {raised:?}");
+        let loud = [0.9, -0.8];
+        assert_eq!(at_speaking_level(&loud), loud, "already loud: unchanged");
+        let hiss = [0.0001, -0.0001];
+        assert!(at_speaking_level(&hiss)[0] < 0.0032 + 1e-6, "at most 30 dB");
     }
 }

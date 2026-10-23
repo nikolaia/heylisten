@@ -340,7 +340,7 @@ fn track_writer(
     debug: bool,
 ) -> Result<(mpsc::Sender<Audio>, JoinHandle<Result<()>>)> {
     let (tx, rx) = mpsc::channel::<Audio>();
-    let mut output = Output { wav: WavWriter::create(&meeting.track_path(track))?, chunker: Chunker::new(track), live, echo };
+    let mut output = Output { wav: WavWriter::create(&meeting.track_path(track))?, chunker: Chunker::new(track)?, live, echo };
     // The meeting's start on the capture clock.
     let since_start = (Local::now() - meeting.start).num_nanoseconds().unwrap_or(0).max(0) as u64;
     let start_ns = capture::now_ns().saturating_sub(since_start);

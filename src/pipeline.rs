@@ -17,6 +17,7 @@ use crate::names;
 use crate::summarize::{self, Writer};
 use crate::transcribe::Transcriber;
 use crate::transcript::{Transcript, Who};
+use crate::vad;
 
 pub enum Event {
     LoadingModel,
@@ -45,6 +46,9 @@ pub enum Event {
 
 pub type OnEvent = Arc<dyn Fn(Event) + Send + Sync>;
 
+/// A track with less speech than this is left out: a cough or a click.
+const MIN_SPEECH_SECONDS: f32 = 0.3;
+
 /// Fewer words than this get a note with the transcript only: a summary of a few sentences
 /// would be mostly made up.
 const MIN_WORDS_TO_SUMMARIZE: usize = 30;
@@ -71,7 +75,7 @@ pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, mode: Mode,
         }
         found = true;
         let samples = audio::read(&path)?;
-        if !audio::has_speech(&samples) {
+        if vad::speech_seconds(&samples)? < MIN_SPEECH_SECONDS {
             on_event(Event::SkippedSilentTrack(track));
             continue;
         }
@@ -104,7 +108,7 @@ pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, mode: Mode,
         // Same as live: chunks cut at pauses keep timestamps (and so speakers) accurate.
         let mut segments = Vec::new();
         for (track, samples) in &tracks {
-            let mut chunker = Chunker::new(*track);
+            let mut chunker = Chunker::new(*track)?;
             let mut chunks = Vec::new();
             chunker.push(samples, &mut chunks);
             chunker.finish(&mut chunks);
