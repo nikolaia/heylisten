@@ -1,6 +1,6 @@
 [package]
 name = "heylisten"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Local-only meeting transcription and summaries, mostly in Norwegian"
 license = "MIT"

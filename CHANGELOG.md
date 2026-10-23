@@ -2,7 +2,9 @@
 
 What changed in each release. Each release's GitHub page shows its section from this file.
 
-## [Unreleased]
+## [0.1.1] - 2026-10-23
+
+Fixes from the first round of testing by colleagues, and meeting titles.
 
 ### Added
 - **Meeting titles:** the summary model names each meeting ("Planlegging av høstlanseringen"), and the note is called that instead of "Møte 08:46". A title you give when starting is kept. An unedited summary prompt from an earlier version is updated to ask for the title; an edited one is left alone.
@@ -14,7 +16,11 @@ What changed in each release. Each release's GitHub page shows its section from 
 - **A recording that was force-quit can be finished.** Its audio files were left unfinished (an empty file, or a header that hadn't caught up), and finishing the meeting failed on them. heyListen now reads whatever audio was written. A meeting where nobody spoke says so, instead of claiming its audio was deleted.
 - **A recording that stopped unexpectedly no longer leaves the menu stuck.** The menu says what happened and offers to finish the meeting (Start waits until then), instead of disabling Stop. The menu bar app also logs its own errors and crashes to `tray.log` in heyListen's data folder.
 - **Others sounding like a duck with AirPods.** In call mode, AirPods run at 24 kHz while the system audio tap reported 48 kHz, so other participants were recorded at double speed and transcribed as "kvakk kvakk". heyListen now uses the device's real rate and checks it against how fast audio arrives.
+- **Long monologues no longer slow down telling speakers apart.** Each speaker's voice is measured from at most 60 s of audio, as intended; a long turn used to go in whole.
 - **Security:** rustls 0.23.46, rustls-webpki 0.103.16 and webpki-roots 1.0.11, for advisories in the libraries behind heyListen's HTTPS downloads (RUSTSEC-2026-0346 to -0349, -0381, -0382).
+
+### Known limitations
+Still as in 0.1.0: not notarized by Apple (click *Open Anyway* under System Settings → Privacy & Security on first launch), Apple Silicon and macOS only, speaker separation still being tuned, debug mode on by default (audio kept 7 days), and no Teams mode yet.
 
 ## [0.1.0] - 2026-10-02
 
@@ -41,5 +47,5 @@ The first release. heyListen records, transcribes and summarizes Norwegian meeti
 - **Debug mode is on by default** while heyListen is being tuned: it keeps each meeting's audio for 7 days, so a note can be redone. Turn it off in the menu.
 - **Teams mode** (record only Teams, silence the mic while you're muted) isn't in this release.
 
-[Unreleased]: https://github.com/nikolaia/heylisten/compare/v0.1.0...HEAD
+[0.1.1]: https://github.com/nikolaia/heylisten/releases/tag/v0.1.1
 [0.1.0]: https://github.com/nikolaia/heylisten/releases/tag/v0.1.0
