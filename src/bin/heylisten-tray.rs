@@ -82,8 +82,6 @@ struct Tray {
     recording: Vec<Icon>,
     frame: usize,
     started: Instant,
-    /// The text next to the icon (elapsed time while recording).
-    title: Option<String>,
     /// Whether the setup items are in the menu right now.
     shown_download: bool,
     shown_install: bool,
@@ -204,7 +202,6 @@ fn run() -> Result<()> {
                     recording: breathing(RECORDING_BREATH, SLOW_FRAME, ([230, 50, 50], 0.85), ([230, 50, 50], 1.0)),
                     frame: 0,
                     started: Instant::now(),
-                    title: None,
                     shown_download: false,
                     shown_install: false,
                 });
@@ -253,6 +250,16 @@ fn run() -> Result<()> {
                         Ok(()) => t.needs = Some(Needs::check(&config)),
                         Err(e) => t.error = Some(format!("Couldn't save the summary model: {e:#}")),
                     }
+                }
+            }
+            // Opening heyListen while it runs. If its icon is hidden (behind the camera notch, in a
+            // full menu bar), this is the only way to reach it.
+            Event::Reopen { .. } => {
+                if let Some(t) = tray.as_mut()
+                    && let Some(mode) = reopened(t)
+                {
+                    t.state = State::Busy("Stopping…".into());
+                    spawn_stop(config.clone(), mode, proxy.clone());
                 }
             }
             Event::UserEvent(UserEvent::Checked(needs, recent)) => {
@@ -331,32 +338,23 @@ impl Tray {
         let idle = matches!(self.state, State::Idle);
         let needs_speech = self.needs.as_ref().is_none_or(|n| n.whisper_model);
 
-        let (text, title) = match &self.state {
-            State::Idle => {
-                let text = match (&self.error, &self.needs) {
-                    (Some(e), _) => e.clone(),
-                    (None, None) => "Checking setup…".into(),
-                    (None, Some(n)) if n.whisper_model => "Setup needed: download the models to start".into(),
-                    (None, Some(n)) if n.ollama_missing => "Ready (summaries need Ollama running)".into(),
-                    (None, Some(n)) if n.engine || n.summary_model => "Ready (download the Norwegian summary model for summaries)".into(),
-                    (None, Some(_)) => "Ready".into(),
-                };
-                (text, None)
-            }
-            State::Starting => ("Starting…".into(), None),
-            State::Recording(m) => {
-                let secs = (Local::now() - m.start).num_seconds().max(0);
-                let elapsed = format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60);
-                (format!("Recording '{}' · {elapsed}", m.title), Some(elapsed))
-            }
-            State::Died(m) => (format!("Recording '{}' stopped unexpectedly. The audio so far is saved", m.title), None),
-            State::Busy(step) => (step.clone(), None),
+        // Only in the menu, never next to the icon: a wider menu bar item is the first that
+        // macOS hides behind the camera notch when the menu bar is full.
+        let text = match &self.state {
+            State::Idle => match (&self.error, &self.needs) {
+                (Some(e), _) => e.clone(),
+                (None, None) => "Checking setup…".into(),
+                (None, Some(n)) if n.whisper_model => "Setup needed: download the models to start".into(),
+                (None, Some(n)) if n.ollama_missing => "Ready (summaries need Ollama running)".into(),
+                (None, Some(n)) if n.engine || n.summary_model => "Ready (download the Norwegian summary model for summaries)".into(),
+                (None, Some(_)) => "Ready".into(),
+            },
+            State::Starting => "Starting…".into(),
+            State::Recording(m) => format!("Recording '{}' · {}", m.title, elapsed(m)),
+            State::Died(m) => format!("Recording '{}' stopped unexpectedly. The audio so far is saved", m.title),
+            State::Busy(step) => step.clone(),
         };
         set_text(&self.items.status, &text);
-        if title != self.title {
-            self.icon.set_title(title.as_deref());
-            self.title = title;
-        }
         set_enabled(&self.items.start, idle && !needs_speech);
         let stoppable = matches!(self.state, State::Recording(_) | State::Died(_));
         set_enabled(&self.items.stop, stoppable);
@@ -480,6 +478,37 @@ fn show(menu: &Menu, item: &MenuItem, at: usize, wanted: bool, shown: bool) -> b
 /// Ollama lists `name:latest` for models pulled without a tag.
 fn ollama_matches(listed: &str, configured: &str) -> bool {
     listed == configured || listed.strip_suffix(":latest") == Some(configured)
+}
+
+fn elapsed(m: &Meeting) -> String {
+    let secs = (Local::now() - m.start).num_seconds().max(0);
+    format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
+}
+
+/// Shows what heyListen is doing when it's opened while already running, with a way to stop a
+/// recording. Returns how to stop, if the person chose to.
+fn reopened(t: &Tray) -> Option<Mode> {
+    use rfd::{MessageButtons, MessageDialog, MessageDialogResult};
+    const HIDDEN: &str = "If you can't see heyListen's ring in the menu bar, macOS is probably hiding it behind \
+        the camera notch because the menu bar is full. Quitting a few other menu bar apps makes room.";
+    let (what, stop) = match &t.state {
+        State::Recording(m) => (format!("heyListen is recording '{}' ({}).", m.title, elapsed(m)), Some("Stop recording")),
+        State::Died(m) => (format!("Recording '{}' stopped unexpectedly. The audio so far is saved.", m.title), Some("Finish it")),
+        State::Busy(step) => (format!("heyListen is busy: {step}"), None),
+        State::Starting => ("heyListen is starting a recording.".into(), None),
+        State::Idle => ("heyListen is running.".into(), None),
+    };
+    let dialog = MessageDialog::new().set_title("heyListen").set_description(format!("{what}\n\n{HIDDEN}"));
+    match stop {
+        Some(stop) => {
+            let answer = dialog.set_buttons(MessageButtons::OkCancelCustom(stop.into(), "Not now".into())).show();
+            (answer == MessageDialogResult::Custom(stop.into())).then_some(Mode::Full)
+        }
+        None => {
+            dialog.set_buttons(MessageButtons::Ok).show();
+            None
+        }
+    }
 }
 
 /// Asks first, then opens a draft GitHub issue in the browser. Nothing is sent from here: the
