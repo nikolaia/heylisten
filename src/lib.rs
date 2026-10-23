@@ -14,6 +14,7 @@ pub mod note;
 pub mod ollama;
 pub mod pipeline;
 pub mod recorder;
+pub mod report;
 pub mod setup;
 pub mod summarize;
 pub mod transcribe;

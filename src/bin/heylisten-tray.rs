@@ -59,6 +59,7 @@ struct Items {
     summary: Submenu,
     notes_dir: MenuItem,
     debug: CheckMenuItem,
+    report: MenuItem,
     quit: MenuItem,
 }
 
@@ -151,6 +152,7 @@ fn run() -> Result<()> {
         summary: Submenu::new("Summary model", true),
         notes_dir: MenuItem::new("Set notes location…", true, None),
         debug: CheckMenuItem::new("Debug mode (keep recordings 7 days)", true, config.debug, None),
+        report: MenuItem::new("Report a problem…", true, None),
         quit: MenuItem::new("Quit heyListen", true, None),
     };
     let menu = Menu::new();
@@ -166,6 +168,7 @@ fn run() -> Result<()> {
         &items.notes_dir,
         &PredefinedMenuItem::separator(),
         &items.debug,
+        &items.report,
         &items.quit,
     ])?;
 
@@ -238,6 +241,8 @@ fn run() -> Result<()> {
                     if let Err(e) = config.set_debug(t.items.debug.is_checked()) {
                         t.error = Some(format!("Couldn't save debug mode: {e:#}"));
                     }
+                } else if id == t.items.report.id() {
+                    report_problem(&config);
                 } else if id == t.items.quit.id() {
                     *control_flow = ControlFlow::Exit;
                 } else if let Some(note) = t.recent_ids.get(id) {
@@ -475,6 +480,27 @@ fn show(menu: &Menu, item: &MenuItem, at: usize, wanted: bool, shown: bool) -> b
 /// Ollama lists `name:latest` for models pulled without a tag.
 fn ollama_matches(listed: &str, configured: &str) -> bool {
     listed == configured || listed.strip_suffix(":latest") == Some(configured)
+}
+
+/// Asks first, then opens a draft GitHub issue in the browser. Nothing is sent from here: the
+/// person reviews the draft on GitHub and decides whether to submit it.
+fn report_problem(config: &Config) {
+    use rfd::{MessageButtons, MessageDialog, MessageDialogResult};
+    let open = "Open draft";
+    let answer = MessageDialog::new()
+        .set_title("Report a problem")
+        .set_description(format!(
+            "heyListen will open a draft GitHub issue in your browser with {}.\n\nNothing is sent: you review the \
+             draft, remove anything you don't want public, and decide whether to submit it.",
+            heylisten::report::CONTENTS
+        ))
+        .set_buttons(MessageButtons::OkCancelCustom(open.into(), "Cancel".into()))
+        .show();
+    if answer == MessageDialogResult::Custom(open.into())
+        && let Err(e) = heylisten::report::open(&heylisten::report::draft(config))
+    {
+        log(&format!("couldn't open the problem report: {e}"));
+    }
 }
 
 /// Every few seconds: what's missing, and the recent notes (also those made from the CLI).

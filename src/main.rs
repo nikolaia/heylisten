@@ -49,6 +49,8 @@ enum Command {
     Setup,
     /// Check models, Ollama and folders, with fixes for anything missing
     Doctor,
+    /// Draft a GitHub issue about a problem, with heyListen's logs (names removed). Asks first
+    Report,
     /// The recorder process itself (started by `start`)
     #[command(name = "__record", hide = true)]
     Record { meeting: String },
@@ -78,6 +80,7 @@ fn main() -> ExitCode {
         Command::Launch { .. } => unreachable!(),
         Command::Process { target } => process(&config, &target),
         Command::Setup => setup(&config),
+        Command::Report => report(&config),
         Command::Doctor => doctor(&config),
     });
     match result {
@@ -131,6 +134,24 @@ fn stop(config: &Config, mode: Mode) -> Result<ExitCode> {
     eprintln!("Stopped '{}' ({})", meeting.title, meeting.id);
     let id = meeting.id.clone();
     pipeline::process(&meeting, config, true, mode, Arc::new(move |e| print_event(&id, e)))?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Shows the draft, then opens it in the browser only if the person says yes. Nothing is sent
+/// from here: they review it on GitHub and decide whether to submit it.
+fn report(config: &Config) -> Result<ExitCode> {
+    let draft = heylisten::report::draft(config);
+    println!("{}\n", draft.body);
+    println!("This draft has {}.", heylisten::report::CONTENTS);
+    print!("Open it in your browser? You review it there, and nothing is sent unless you submit it. [y/N] ");
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    if answer.trim().eq_ignore_ascii_case("y") {
+        heylisten::report::open(&draft)?;
+    } else {
+        println!("Nothing opened.");
+    }
     Ok(ExitCode::SUCCESS)
 }
 

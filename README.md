@@ -90,6 +90,7 @@ heylisten process memo.m4a     # transcribe an audio file (m4a, mp3, wav, flac, 
 heylisten process <meeting-id> # redo a meeting from its saved audio
 heylisten setup                # download the models and the summary engine
 heylisten doctor               # check everything, with copy-paste fixes
+heylisten report               # draft a GitHub issue with the logs (names removed); asks first
 ```
 
 The tray app and the CLI share one recorder, so you can start a recording in one and stop it in the other.
@@ -182,6 +183,8 @@ git config core.hooksPath .githooks                     # run check.sh before ev
 The build downloads sherpa-onnx and two small speaker-recognition models, which get embedded in the binary. Pushing a `v*` tag runs [the release workflow](.github/workflows/release.yml), which builds the app and attaches the zip to a GitHub Release.
 
 **Debugging:** *Debug mode (keep recordings 7 days)* is on by default while heyListen is being tuned. Turn it off in the menu, or with `debug = false` in the config. It keeps each meeting's audio so `heylisten process <id>` can redo the note, and logs the devices, audio errors, how much audio each track receives, and the speaker turns to `recorder.log` in the meeting folder. **Kept audio is always deleted after 7 days**, whatever the settings; transcripts and notes stay.
+
+**Reporting a problem:** *Report a problem…* in the menu (or `heylisten report`) drafts a GitHub issue with your versions, a few settings and the last lines of the logs, with names, meeting titles and your home folder removed. It asks first, and only opens the draft in your browser: nothing is sent unless you review it and submit it there.
 
 **Long meetings:** `scripts/scale-test.sh` runs the whole pipeline on synthetic 2-, 4- and 8-minute meetings (a few minutes in total) and predicts what an hour will take. On a MacBook Pro M3 Pro:
 

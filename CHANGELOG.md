@@ -6,6 +6,7 @@ What changed in each release. Each release's GitHub page shows its section from 
 
 ### Added
 - **Meeting titles:** the summary model names each meeting ("Planlegging av høstlanseringen"), and the note is called that instead of "Møte 08:46". A title you give when starting is kept. An unedited summary prompt from an earlier version is updated to ask for the title; an edited one is left alone.
+- **Report a problem…** in the menu (`heylisten report`): drafts a GitHub issue with your versions, a few settings and the last lines of the logs, with names, meeting titles and your home folder removed. It asks first and only opens the draft in your browser; nothing is sent unless you submit it.
 - **Stop without summary** in the menu (`heylisten stop --transcript-only`): just the transcript, in seconds.
 
 ### Fixed
