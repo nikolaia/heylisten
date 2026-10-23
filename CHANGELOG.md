@@ -4,6 +4,9 @@ What changed in each release. Each release's GitHub page shows its section from 
 
 ## [Unreleased]
 
+### Fixed
+- **No made-up meeting when nothing was said.** Starting and stopping a recording right away gave the summary model an empty transcript, and it invented a whole meeting. Now a recording where nobody spoke gets no note, and one with under 30 words gets the transcript without a summary. The summary prompt no longer has an example title for the model to copy; an unedited prompt is updated.
+
 ### Added
 - **Homebrew:** `brew install --cask nikolaia/tap/heylisten`, and `brew upgrade --cask heylisten` for updates. The [tap](https://github.com/nikolaia/homebrew-tap) follows releases on its own, and only moves to a release whose zip matches its checksum and was built by this repo's release workflow.
 

@@ -35,6 +35,8 @@ pub enum Event {
     Summarizing { part: usize, parts: usize },
     /// The note is written without a summary, and the audio is kept so `process` can retry.
     SummaryFailed(String),
+    /// Too few words to summarize without making things up: the note has the transcript only.
+    TooShortToSummarize(usize),
     NoteWritten(PathBuf),
     AudioDeleted,
     /// How long a step took: "transcription", "speakers" or "names and summary".
@@ -42,6 +44,10 @@ pub enum Event {
 }
 
 pub type OnEvent = Arc<dyn Fn(Event) + Send + Sync>;
+
+/// Fewer words than this get a note with the transcript only: a summary of a few sentences
+/// would be mostly made up.
+const MIN_WORDS_TO_SUMMARIZE: usize = 30;
 
 /// How much of the note to make.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,7 +118,15 @@ pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, mode: Mode,
         on_event(Event::Took("transcription", started.elapsed()));
         Transcript::merge(segments)
     };
-    if mode == Mode::TranscriptOnly {
+    // Given next to nothing, the summary model invents a meeting. Nothing at all: no note.
+    let words: usize = transcript.segments.iter().map(|s| s.text.split_whitespace().count()).sum();
+    if words == 0 {
+        bail!("nothing was said in '{}', so no note was written", meeting.title);
+    }
+    if mode == Mode::Full && words < MIN_WORDS_TO_SUMMARIZE {
+        on_event(Event::TooShortToSummarize(words));
+    }
+    if mode == Mode::TranscriptOnly || words < MIN_WORDS_TO_SUMMARIZE {
         return write_note(&meeting, &transcript, None, true, config, &on_event);
     }
 

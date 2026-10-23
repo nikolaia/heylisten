@@ -215,6 +215,7 @@ fn print_event(meeting_id: &str, event: Event) {
             eprintln!("{} {why}", red("No summary:"));
             eprintln!("Audio kept. When Ollama is up (`heylisten doctor`), retry with: heylisten process {meeting_id}");
         }
+        Event::TooShortToSummarize(words) => eprintln!("Only {words} words: the note has the transcript, without a summary"),
         Event::NoteWritten(path) => println!("Note: {}", path.display()),
         Event::AudioDeleted => eprintln!("Deleted audio (keep_audio and debug are off)"),
         Event::Took(step, took) => eprintln!("  {step} took {:.1} s", took.as_secs_f32()),
