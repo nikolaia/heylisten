@@ -2,7 +2,9 @@
 
 What changed in each release. Each release's GitHub page shows its section from this file.
 
-## [Unreleased]
+## [0.1.2] - 2026-10-23
+
+Quiet mics, and Homebrew.
 
 ### Fixed
 - **Quiet mics are transcribed.** Speech was found by volume, so a quiet mic (a MacBook's built-in one at a distance, or an interface with low gain) was taken for silence and dropped. A voice detector (Silero VAD) now decides what's speech by how it sounds, and quiet speech is brought up to a normal level before transcribing. Music, typing and silence no longer reach the transcriber, which also makes transcription faster (about 14 s per minute of meeting instead of 19; live keeps up at 4× real time).
@@ -10,6 +12,9 @@ What changed in each release. Each release's GitHub page shows its section from 
 
 ### Added
 - **Homebrew:** `brew install --cask nikolaia/tap/heylisten`, and `brew upgrade --cask heylisten` for updates. The [tap](https://github.com/nikolaia/homebrew-tap) follows releases on its own, and only moves to a release whose zip matches its checksum and was built by this repo's release workflow.
+
+### Known limitations
+Still as in 0.1.0: not notarized by Apple (click *Open Anyway* under System Settings → Privacy & Security after each install or upgrade), Apple Silicon and macOS only, speaker separation still being tuned, debug mode on by default (audio kept 7 days), and no Teams mode yet.
 
 ## [0.1.1] - 2026-10-23
 
@@ -56,5 +61,6 @@ The first release. heyListen records, transcribes and summarizes Norwegian meeti
 - **Debug mode is on by default** while heyListen is being tuned: it keeps each meeting's audio for 7 days, so a note can be redone. Turn it off in the menu.
 - **Teams mode** (record only Teams, silence the mic while you're muted) isn't in this release.
 
+[0.1.2]: https://github.com/nikolaia/heylisten/releases/tag/v0.1.2
 [0.1.1]: https://github.com/nikolaia/heylisten/releases/tag/v0.1.1
 [0.1.0]: https://github.com/nikolaia/heylisten/releases/tag/v0.1.0
