@@ -86,7 +86,7 @@ fn main() -> ExitCode {
 }
 
 fn start(title: Option<String>) -> Result<ExitCode> {
-    let title = title.unwrap_or_else(|| chrono::Local::now().format("Møte %H:%M").to_string());
+    let title = title.unwrap_or_else(|| heylisten::note::default_title(chrono::Local::now()));
     let meeting = recorder::spawn(&std::env::current_exe()?, title)?;
     println!("Recording '{}' ({}). Stop with: heylisten stop", meeting.title, meeting.id);
     if std::io::stdout().is_terminal() {

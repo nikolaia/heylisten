@@ -196,11 +196,13 @@ fn voices(samples: &[f32], turns: &[Turn], model: &CString) -> Result<BTreeMap<i
         for speaker in speakers {
             let mut own: Vec<&Turn> = turns.iter().filter(|t| t.speaker == speaker).collect();
             own.sort_by_key(|t| std::cmp::Reverse(t.end_ms - t.start_ms));
+            const MAX: usize = 16_000 * 60;
             let mut audio = Vec::new();
             for t in own {
                 let (s, e) = ((t.start_ms * 16) as usize, ((t.end_ms * 16) as usize).min(samples.len()));
-                audio.extend_from_slice(&samples[s.min(e)..e]);
-                if audio.len() >= 16_000 * 60 {
+                let s = s.min(e);
+                audio.extend_from_slice(&samples[s..e.min(s + MAX - audio.len())]);
+                if audio.len() >= MAX {
                     break;
                 }
             }
@@ -208,6 +210,9 @@ fn voices(samples: &[f32], turns: &[Turn], model: &CString) -> Result<BTreeMap<i
                 continue;
             }
             let stream = sys::SherpaOnnxSpeakerEmbeddingExtractorCreateStream(extractor);
+            if stream.is_null() {
+                continue;
+            }
             sys::SherpaOnnxOnlineStreamAcceptWaveform(stream, 16_000, audio.as_ptr(), audio.len() as i32);
             sys::SherpaOnnxOnlineStreamInputFinished(stream);
             if sys::SherpaOnnxSpeakerEmbeddingExtractorIsReady(extractor, stream) != 0 {

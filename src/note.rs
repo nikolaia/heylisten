@@ -72,10 +72,18 @@ pub fn take_title(summary: &mut String) -> Option<String> {
     (!title.is_empty() && title.chars().count() <= MAX_TITLE).then_some(title)
 }
 
+/// The title a meeting gets when it starts without one: "Møte 08:46".
+const DEFAULT_TITLE: &str = "Møte %H:%M";
+
+pub fn default_title(at: chrono::DateTime<chrono::Local>) -> String {
+    at.format(DEFAULT_TITLE).to_string()
+}
+
 /// Whether a meeting still has the title it got when it started ("Møte 08:46"), so a title
-/// from the summary may replace it.
+/// from the summary may replace it. Exactly that form: chrono's parser alone would also take
+/// "Møte 8:46" or "Møte  08:46", which a person may have typed.
 pub fn has_default_title(meeting: &Meeting) -> bool {
-    meeting.title.strip_prefix("Møte ").is_some_and(|time| chrono::NaiveTime::parse_from_str(time, "%H:%M").is_ok())
+    chrono::NaiveTime::parse_from_str(&meeting.title, DEFAULT_TITLE).is_ok_and(|t| t.format(DEFAULT_TITLE).to_string() == meeting.title)
 }
 
 /// Models don't always write tasks as `- [ ]`; make every list item under "## Oppgaver" one.
@@ -182,5 +190,8 @@ mod tests {
         assert!(has_default_title(&meeting));
         meeting.title = "Møte med kunden".into();
         assert!(!has_default_title(&meeting));
+        meeting.title = "Møte 8:46".into();
+        assert!(!has_default_title(&meeting));
+        assert!(has_default_title(&Meeting { title: default_title(meeting.start), ..meeting }));
     }
 }

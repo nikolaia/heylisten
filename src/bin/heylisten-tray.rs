@@ -456,7 +456,7 @@ fn spawn_checker(proxy: EventLoopProxy<UserEvent>) {
 
 fn spawn_start(cli: PathBuf, proxy: EventLoopProxy<UserEvent>) {
     thread::spawn(move || {
-        let title = Local::now().format("Møte %H:%M").to_string();
+        let title = heylisten::note::default_title(Local::now());
         let result = recorder::spawn(&cli, title).map_err(|e| format!("{e:#}"));
         let _ = proxy.send_event(UserEvent::Started(result));
     });
