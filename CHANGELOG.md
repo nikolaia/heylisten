@@ -2,6 +2,12 @@
 
 What changed in each release. Each release's GitHub page shows its section from this file.
 
+## [Unreleased]
+
+### Fixed
+- **Handovers name people.** "Over til deg, Sindre" or "Kan du ta resten, Kari?" now names whoever speaks next; before, only a name at the start of a sentence counted ("Kari, kan du…"). A remark like "Rosa, kanskje." doesn't: an address has to be a question or say "du", "deg" or "dere".
+- **You get your name too.** When the meeting makes it clear ("Kan du ta over, Torbjørn?"), `Meg` becomes your name in the note and the summary, listed in the frontmatter with its evidence like everyone else's.
+
 ## [0.1.2] - 2026-10-23
 
 Quiet mics, and Homebrew.
@@ -61,6 +67,7 @@ The first release. heyListen records, transcribes and summarizes Norwegian meeti
 - **Debug mode is on by default** while heyListen is being tuned: it keeps each meeting's audio for 7 days, so a note can be redone. Turn it off in the menu.
 - **Teams mode** (record only Teams, silence the mic while you're muted) isn't in this release.
 
+[Unreleased]: https://github.com/nikolaia/heylisten/compare/v0.1.2...HEAD
 [0.1.2]: https://github.com/nikolaia/heylisten/releases/tag/v0.1.2
 [0.1.1]: https://github.com/nikolaia/heylisten/releases/tag/v0.1.1
 [0.1.0]: https://github.com/nikolaia/heylisten/releases/tag/v0.1.0

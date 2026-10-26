@@ -112,7 +112,7 @@ pub fn short_name(model: &str) -> &str {
 
 /// Splits the transcript into texts that each fit in `budget_chars`.
 pub fn split(transcript: &Transcript, budget_chars: usize) -> Vec<String> {
-    let render = |segments: Vec<Segment>| Transcript { segments, names: transcript.names.clone() }.text();
+    let render = |segments: Vec<Segment>| Transcript { segments, names: transcript.names.clone(), me: transcript.me.clone() }.text();
     let mut parts = Vec::new();
     let mut current: Vec<Segment> = Vec::new();
     let mut len = 0;

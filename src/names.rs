@@ -24,17 +24,17 @@ const NOT_NAMES: &[&str] = &[
     "også", "så", "supert", "takk", "uansett", "vel", "vi", "yes", "ålreit",
 ];
 
-/// A possible name for a speaker, and the sentence it comes from.
+/// A possible name for a speaker (a Taler, or Me), and the sentence it comes from.
 #[derive(Debug, Clone, PartialEq)]
 struct Candidate {
-    speaker: u32,
+    speaker: Who,
     name: String,
     evidence: String,
 }
 
-/// Names for the transcript's speakers, where the transcript makes them clear.
-/// `debug` logs the candidates and the model's answer.
-pub fn find(writer: &Writer, transcript: &Transcript, debug: bool) -> Result<BTreeMap<u32, Naming>> {
+/// Names for the transcript's speakers (Taler N, and Me), where the transcript makes them
+/// clear. `debug` logs the candidates and the model's answer.
+pub fn find(writer: &Writer, transcript: &Transcript, debug: bool) -> Result<BTreeMap<Who, Naming>> {
     let candidates = candidates(&transcript.paragraphs());
     if candidates.is_empty() {
         return Ok(BTreeMap::new());
@@ -60,26 +60,31 @@ fn people(reply: &str) -> BTreeSet<String> {
 
 /// Every place the transcript shows a speaker's name:
 /// - an introduction in their own words: "dette er Kari", "jeg heter Kari", "Kari her"
-/// - being addressed: a sentence starting "Kari, …" names the next speaker, if it's among the
-///   last of what someone said (a name in the middle of a story is someone in the story)
+/// - being addressed: "Kari, kan du …?" or a handover like "Over til deg, Kari." names the next
+///   speaker, if it's among the last of what someone said (a name in the middle of a story is
+///   someone in the story) and is said to someone: a question, or with "du"/"deg"/"dere"
 /// - being thanked: "Takk, Kari" names the previous speaker
+///
+/// Others ("Andre", everyone on the system track before speakers are told apart) is a group,
+/// not a person, so it's never named.
 fn candidates(paragraphs: &[Paragraph]) -> Vec<Candidate> {
-    let speaker = |who: Option<Who>| match who {
-        Some(Who::Speaker(n)) => Some(n),
-        _ => None,
-    };
+    let speaker = |who: Option<Who>| who.filter(|w| matches!(w, Who::Me | Who::Speaker(_)));
     let mut out = Vec::new();
     for (i, p) in paragraphs.iter().enumerate() {
         let own = speaker(Some(p.who));
         let next = speaker(paragraphs.get(i + 1).map(|q| q.who)).filter(|n| Some(*n) != own);
         let previous = speaker(i.checked_sub(1).map(|j| paragraphs[j].who)).filter(|n| Some(*n) != own);
-        let sentences: Vec<&str> = p.text.split(['.', '?', '!']).map(str::trim).filter(|s| !s.is_empty()).collect();
+        let sentences: Vec<&str> = p.text.split_inclusive(['.', '?', '!']).map(str::trim).filter(|s| !s.is_empty()).collect();
         for (k, sentence) in sentences.iter().enumerate() {
+            let question = sentence.ends_with('?');
+            let sentence = &sentence.trim_end_matches(['.', '?', '!']);
             let near_the_end = k + ADDRESS_SENTENCES >= sentences.len();
             let tokens: Vec<&str> = sentence.split_whitespace().collect();
             let words: Vec<String> = tokens.iter().map(|t| t.trim_matches(|c: char| !c.is_alphabetic()).to_string()).collect();
             let lower: Vec<String> = words.iter().map(|w| w.to_lowercase()).collect();
-            let mut found = |speaker: Option<u32>, word: &str| {
+            // Speaking to someone: a question, or "du"/"deg"/"dere". Not "Rosa, kanskje".
+            let to_someone = question || lower.iter().any(|w| matches!(w.as_str(), "du" | "deg" | "dere"));
+            let mut found = |speaker: Option<Who>, word: &str| {
                 if let Some(speaker) = speaker
                     && could_be_a_name(word)
                 {
@@ -101,8 +106,17 @@ fn candidates(paragraphs: &[Paragraph]) -> Vec<Candidate> {
                 found(own, &words[0]);
             }
             // Addressed: "X, …" at the start of the sentence, but not "X, som …" (describing X).
-            if near_the_end && tokens.first().is_some_and(|t| t.ends_with(',')) && lower.get(1).is_none_or(|w| w != "som") {
+            if near_the_end && to_someone && tokens.first().is_some_and(|t| t.ends_with(',')) && lower.get(1).is_none_or(|w| w != "som") {
                 found(next, &words[0]);
+            }
+            // Handed over to: "…, X" at the end of the sentence. Not "Takk, X": that's thanks.
+            if near_the_end
+                && to_someone
+                && tokens.len() >= 2
+                && tokens[tokens.len() - 2].ends_with(',')
+                && !lower.iter().any(|w| w == "takk")
+            {
+                found(next, &words[words.len() - 1]);
             }
             // Thanked: "takk, X" / "takk X".
             for k in 0..lower.len().saturating_sub(1) {
@@ -128,12 +142,12 @@ fn could_be_a_name(word: &str) -> bool {
 
 /// Gives a speaker a name when every confirmed candidate for them agrees, and the name isn't
 /// claimed by another speaker too.
-fn assign(candidates: &[Candidate], people: &BTreeSet<String>) -> BTreeMap<u32, Naming> {
-    let mut by_speaker: BTreeMap<u32, Vec<&Candidate>> = BTreeMap::new();
+fn assign(candidates: &[Candidate], people: &BTreeSet<String>) -> BTreeMap<Who, Naming> {
+    let mut by_speaker: BTreeMap<Who, Vec<&Candidate>> = BTreeMap::new();
     for c in candidates.iter().filter(|c| people.contains(&c.name.to_lowercase())) {
         by_speaker.entry(c.speaker).or_default().push(c);
     }
-    let mut names: BTreeMap<u32, Naming> = BTreeMap::new();
+    let mut names: BTreeMap<Who, Naming> = BTreeMap::new();
     for (speaker, found) in by_speaker {
         let distinct: BTreeSet<String> = found.iter().map(|c| c.name.to_lowercase()).collect();
         if distinct.len() == 1 {
@@ -178,9 +192,9 @@ mod tests {
     #[test]
     fn finds_who_is_who_from_the_patterns() {
         let names = assign(&candidates(&meeting()), &confirmed(&["Kari", "Ola"]));
-        assert_eq!(names[&2].name, "Kari");
-        assert_eq!(names[&3].name, "Ola");
-        assert!(!names.contains_key(&1), "the host never says her own name");
+        assert_eq!(names[&Who::Speaker(2)].name, "Kari");
+        assert_eq!(names[&Who::Speaker(3)].name, "Ola");
+        assert!(!names.contains_key(&Who::Speaker(1)), "the host never says her own name");
     }
 
     #[test]
@@ -194,16 +208,16 @@ mod tests {
         assert!(assign(&candidates(&meeting()), &confirmed(&[])).is_empty());
         let names = assign(&candidates(&meeting()), &confirmed(&["Ola"]));
         assert_eq!(names.len(), 1);
-        assert_eq!(names[&3].name, "Ola");
+        assert_eq!(names[&Who::Speaker(3)].name, "Ola");
     }
 
     #[test]
     fn conflicting_names_leave_a_speaker_unnamed() {
         let mut found = candidates(&meeting());
-        found.push(Candidate { speaker: 2, name: "Per".into(), evidence: "Per, vil du si noe".into() });
+        found.push(Candidate { speaker: Who::Speaker(2), name: "Per".into(), evidence: "Per, vil du si noe".into() });
         let names = assign(&found, &confirmed(&["Kari", "Ola", "Per"]));
-        assert!(!names.contains_key(&2));
-        assert_eq!(names[&3].name, "Ola");
+        assert!(!names.contains_key(&Who::Speaker(2)));
+        assert_eq!(names[&Who::Speaker(3)].name, "Ola");
     }
 
     #[test]
@@ -226,5 +240,58 @@ mod tests {
             .collect();
         let paragraphs = Transcript { segments, ..Default::default() }.paragraphs();
         assert!(candidates(&paragraphs).is_empty());
+    }
+
+    /// Paragraphs from (who, text) lines.
+    fn paragraphs(lines: &[(Who, &str)]) -> Vec<Paragraph> {
+        let segments = lines
+            .iter()
+            .enumerate()
+            .map(|(i, (who, text))| Segment { start_ms: i as u64 * 1000, end_ms: i as u64 * 1000 + 900, who: *who, text: text.to_string(), words: Vec::new() })
+            .collect();
+        Transcript { segments, ..Default::default() }.paragraphs()
+    }
+
+    #[test]
+    fn a_handover_at_the_end_of_a_sentence_names_the_next_speaker() {
+        let found = candidates(&paragraphs(&[
+            (Who::Speaker(1), "Det var status fra meg. Over til deg, Sindre."),
+            (Who::Speaker(2), "Her går det bra."),
+            (Who::Speaker(1), "Kan du ta resten, Kari?"),
+            (Who::Speaker(3), "Ja."),
+        ]));
+        let names = assign(&found, &confirmed(&["Sindre", "Kari"]));
+        assert_eq!(names[&Who::Speaker(2)].name, "Sindre");
+        assert_eq!(names[&Who::Speaker(3)].name, "Kari");
+    }
+
+    #[test]
+    fn names_me_too() {
+        let found = candidates(&paragraphs(&[
+            (Who::Speaker(1), "Det var alt fra meg. Kan du ta over, Torbjørn?"),
+            (Who::Me, "Ja, ikke noe nytt her."),
+        ]));
+        let names = assign(&found, &confirmed(&["Torbjørn"]));
+        assert_eq!(names[&Who::Me].name, "Torbjørn");
+        assert_eq!(names[&Who::Me].evidence, "Kan du ta over, Torbjørn");
+    }
+
+    #[test]
+    fn thanks_at_the_end_names_the_previous_speaker_not_the_next() {
+        let found = candidates(&paragraphs(&[
+            (Who::Speaker(1), "Prisene er oppdatert."),
+            (Who::Speaker(2), "Flott. Takk, Ola."),
+            (Who::Speaker(3), "Neste sak er budsjettet."),
+        ]));
+        let names = assign(&found, &confirmed(&["Ola"]));
+        assert_eq!(names.get(&Who::Speaker(1)).map(|n| n.name.as_str()), Some("Ola"));
+        assert!(!names.contains_key(&Who::Speaker(3)));
+    }
+
+    #[test]
+    fn a_remark_with_a_comma_is_not_an_address() {
+        // "rosa" as in the colour, before the recorder speaks.
+        let found = candidates(&paragraphs(&[(Who::Speaker(5), "Jeg vet ikke. Rosa, kanskje."), (Who::Me, "Det høres fint ut.")]));
+        assert!(found.iter().all(|c| c.name != "Rosa"), "{found:?}");
     }
 }

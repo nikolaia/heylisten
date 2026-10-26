@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 /// Who said something. See CONTEXT.md: Me, Others, Speaker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Who {
     Me,
@@ -46,6 +46,9 @@ pub struct Transcript {
     /// nothing about anyone's voice is kept.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub names: BTreeMap<u32, Naming>,
+    /// Your own name, if the meeting made it clear ("Over til deg, Torbjørn").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub me: Option<Naming>,
 }
 
 /// A speaker's name, and the line in the transcript it was found from.
@@ -70,15 +73,30 @@ impl Transcript {
         let echoes: Vec<bool> = segments.iter().map(|s| is_echo(s, &segments)).collect();
         let mut echoes = echoes.into_iter();
         segments.retain(|_| !echoes.next().unwrap());
-        Transcript { segments, names: BTreeMap::new() }
+        Transcript { segments, names: BTreeMap::new(), me: None }
+    }
+
+    /// Takes the names found for this meeting's speakers.
+    pub fn set_names(&mut self, found: BTreeMap<Who, Naming>) {
+        for (who, naming) in found {
+            match who {
+                Who::Me => self.me = Some(naming),
+                Who::Speaker(n) => {
+                    self.names.insert(n, naming);
+                }
+                Who::Others => {}
+            }
+        }
     }
 
     /// How someone is shown: their name if it was found, otherwise "Meg", "Andre", "Taler N".
     pub fn label(&self, who: Who) -> String {
-        match who {
-            Who::Speaker(n) => self.names.get(&n).map_or_else(|| who.label(), |n| n.name.clone()),
-            _ => who.label(),
-        }
+        let named = match who {
+            Who::Speaker(n) => self.names.get(&n),
+            Who::Me => self.me.as_ref(),
+            Who::Others => None,
+        };
+        named.map_or_else(|| who.label(), |n| n.name.clone())
     }
 
     /// The transcript as plain text, "Navn: tekst" per paragraph.

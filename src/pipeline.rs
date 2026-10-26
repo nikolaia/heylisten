@@ -157,12 +157,12 @@ pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, mode: Mode,
     let started = Instant::now();
     let summary = (|| -> Result<String> {
         let writer = Writer::open(config, &transcript)?;
-        if transcript.people().iter().any(|w| matches!(w, Who::Speaker(_))) {
+        if transcript.people().iter().any(|w| matches!(w, Who::Speaker(_) | Who::Me)) {
             on_event(Event::FindingNames);
             match names::find(&writer, &transcript, config.debug) {
                 Ok(found) => {
                     on_event(Event::NamesFound(found.values().map(|n| n.name.clone()).collect()));
-                    transcript.names = found;
+                    transcript.set_names(found);
                 }
                 Err(e) => on_event(Event::NamesFailed(format!("{e:#}"))),
             }
