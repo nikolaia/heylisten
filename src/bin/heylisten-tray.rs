@@ -19,6 +19,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use heylisten::config::{Config, SummaryEngine};
 use heylisten::meeting::Meeting;
 use heylisten::pipeline::{self, Event as PipelineEvent, Mode};
+use heylisten::summarize::Progress as SummaryProgress;
 use heylisten::recorder::{self, Status};
 use heylisten::setup::{self, Needs, Progress};
 
@@ -68,6 +69,8 @@ struct Tray {
     menu: Menu,
     items: Items,
     state: State,
+    /// While recording: seconds of audio the live transcript hasn't got to yet.
+    behind_s: f32,
     needs: Option<Needs>,
     error: Option<String>,
     recent: Vec<PathBuf>,
@@ -191,6 +194,7 @@ fn run() -> Result<()> {
                     menu: menu.clone(),
                     items: items.take().unwrap(),
                     state: State::Idle,
+                    behind_s: 0.0,
                     needs: None,
                     error: None,
                     recent: Vec::new(),
@@ -330,7 +334,10 @@ impl Tray {
                 log(&format!("recorder for {} stopped unexpectedly; see recorder.log in its meeting folder", meeting.id));
             }
             self.state = match status {
-                Ok(Status::Recording { meeting, .. }) => State::Recording(meeting),
+                Ok(Status::Recording { meeting, behind_s, .. }) => {
+                    self.behind_s = behind_s;
+                    State::Recording(meeting)
+                }
                 Ok(Status::Died { meeting }) => State::Died(meeting),
                 _ => State::Idle,
             };
@@ -350,6 +357,9 @@ impl Tray {
                 (None, Some(_)) => "Ready".into(),
             },
             State::Starting => "Starting…".into(),
+            State::Recording(m) if self.behind_s >= recorder::BEHIND_WARNING_S => {
+                format!("Recording '{}' · {} · {}", m.title, elapsed(m), recorder::behind_warning(self.behind_s))
+            }
             State::Recording(m) => format!("Recording '{}' · {}", m.title, elapsed(m)),
             State::Died(m) => format!("Recording '{}' stopped unexpectedly. The audio so far is saved", m.title),
             State::Busy(step) => step.clone(),
@@ -567,17 +577,24 @@ fn spawn_start(cli: PathBuf, proxy: EventLoopProxy<UserEvent>) {
 fn spawn_stop(config: Config, mode: Mode, proxy: EventLoopProxy<UserEvent>) {
     thread::spawn(move || {
         let result = (|| -> Result<PathBuf> {
-            let meeting = recorder::stop().context("couldn't stop")?;
+            let _awake = heylisten::awake::Activity::begin("Making a meeting note");
+            let progress = proxy.clone();
+            let meeting = recorder::stop(move |left| {
+                let _ = progress.send_event(UserEvent::Busy(format!("Transcribing the rest: {}…", recorder::describe_left(left))));
+            })
+            .context("couldn't stop")?;
             let p = proxy.clone();
             let on_event = Arc::new(move |e: PipelineEvent| {
                 let step = match e {
-                    PipelineEvent::LoadingModel | PipelineEvent::Transcribing { .. } => "Transcribing…",
-                    PipelineEvent::Diarizing(_) => "Telling speakers apart…",
-                    PipelineEvent::FindingNames => "Finding names…",
-                    PipelineEvent::Summarizing { .. } => "Summarizing…",
+                    PipelineEvent::LoadingModel | PipelineEvent::Transcribing { .. } => "Transcribing…".into(),
+                    PipelineEvent::Diarizing(_) => "Telling speakers apart…".into(),
+                    PipelineEvent::FindingNames => "Finding names…".into(),
+                    PipelineEvent::Summarizing { .. } => "Summarizing…".into(),
+                    PipelineEvent::SummaryProgress(SummaryProgress::Reading(percent)) => format!("Summarizing: reading the meeting {percent}%…"),
+                    PipelineEvent::SummaryProgress(SummaryProgress::Writing(words)) => format!("Summarizing: {words} words written…"),
                     _ => return,
                 };
-                let _ = p.send_event(UserEvent::Busy(step.into()));
+                let _ = p.send_event(UserEvent::Busy(step));
             });
             pipeline::process(&meeting, &config, true, mode, on_event)
                 .with_context(|| format!("couldn't make the note for '{}' (try again: heylisten process {})", meeting.title, meeting.id))

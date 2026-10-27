@@ -34,6 +34,8 @@ pub enum Event {
     /// The note keeps "Taler N".
     NamesFailed(String),
     Summarizing { part: usize, parts: usize },
+    /// How far the summary engine has got with the current request.
+    SummaryProgress(summarize::Progress),
     /// The note is written without a summary, and the audio is kept so `process` can retry.
     SummaryFailed(String),
     /// Too few words to summarize without making things up: the note has the transcript only.
@@ -168,7 +170,7 @@ pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, mode: Mode,
             }
         }
         on_event(Event::Summarizing { part: 1, parts: 1 });
-        writer.summarize(&transcript, |part, parts| on_event(Event::Summarizing { part, parts }))
+        writer.summarize(&transcript, |part, parts| on_event(Event::Summarizing { part, parts }), &mut |p| on_event(Event::SummaryProgress(p)))
     })()
     .map(|mut text| {
         // The summary's title names the note, unless the meeting was given one when it started.

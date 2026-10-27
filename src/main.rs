@@ -129,8 +129,15 @@ fn watch() -> Result<ExitCode> {
 }
 
 fn stop(config: &Config, mode: Mode) -> Result<ExitCode> {
+    let _awake = heylisten::awake::Activity::begin("Making a meeting note");
     eprintln!("Stopping (finishing the live transcript)…");
-    let meeting = recorder::stop()?;
+    // The first report is the whole backlog: the bar fills from there.
+    let mut total = None;
+    let meeting = recorder::stop(|left| {
+        let total = *total.get_or_insert(left.max(1.0));
+        progress("Transcribing the rest", &format!("{} {}", bar(1.0 - left / total), recorder::describe_left(left)));
+    })?;
+    end_progress();
     eprintln!("Stopped '{}' ({})", meeting.title, meeting.id);
     let id = meeting.id.clone();
     pipeline::process(&meeting, config, true, mode, Arc::new(move |e| print_event(&id, e)))?;
@@ -158,10 +165,13 @@ fn report(config: &Config) -> Result<ExitCode> {
 fn status() -> Result<ExitCode> {
     match recorder::status()? {
         RecorderStatus::Idle => println!("Idle"),
-        RecorderStatus::Recording { meeting, .. } => {
+        RecorderStatus::Recording { meeting, behind_s, .. } => {
             let secs = (chrono::Local::now() - meeting.start).num_seconds();
             let elapsed = format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60);
             println!("Recording '{}' for {elapsed} ({})", meeting.title, meeting.id);
+            if behind_s >= recorder::BEHIND_WARNING_S {
+                println!("{}", recorder::behind_warning(behind_s));
+            }
         }
         RecorderStatus::Died { meeting } => {
             println!("{} '{}' ({})", red("Recorder died while recording"), meeting.title, meeting.id);
@@ -172,6 +182,7 @@ fn status() -> Result<ExitCode> {
 }
 
 fn process(config: &Config, target: &str) -> Result<ExitCode> {
+    let _awake = heylisten::awake::Activity::begin("Making a meeting note");
     let meeting = if Path::new(target).is_file() {
         eprintln!("Importing {target}…");
         Meeting::import(Path::new(target))?
@@ -184,18 +195,56 @@ fn process(config: &Config, target: &str) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// The label of the progress line that's open, if any.
+static PROGRESS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// A line that redraws in place in a terminal: "Summarizing ▕████░░░░▏ 40%". Piped or logged,
+/// nothing: the step lines around it say what's going on, and a log stays short.
+fn progress(label: &str, detail: &str) {
+    if std::io::stderr().is_terminal() {
+        eprint!("\r\x1b[2K{label} {detail}");
+        let _ = std::io::stderr().flush();
+        *PROGRESS.lock().unwrap() = Some(label.to_string());
+    }
+}
+
+/// Ends an open progress line, so the next line starts on its own.
+fn end_progress() {
+    if PROGRESS.lock().unwrap().take().is_some() {
+        eprintln!();
+    }
+}
+
+/// "▕████████░░░░░░░░░░░░▏  40%"
+fn bar(fraction: f32) -> String {
+    const WIDTH: usize = 20;
+    let fraction = fraction.clamp(0.0, 1.0);
+    let filled = (fraction * WIDTH as f32).round() as usize;
+    format!("▕{}{}▏ {:>3}%", "█".repeat(filled), "░".repeat(WIDTH - filled), (fraction * 100.0).round() as u32)
+}
+
 fn print_event(meeting_id: &str, event: Event) {
+    // Progress redraws its own line; anything else ends it first.
+    match event {
+        Event::Transcribing { track, percent } => {
+            progress(&format!("Transcribing the {} track", track.name()), &bar(percent as f32 / 100.0));
+            return;
+        }
+        Event::SummaryProgress(heylisten::summarize::Progress::Reading(percent)) => {
+            progress("Summarizing: reading the meeting", &bar(percent as f32 / 100.0));
+            return;
+        }
+        Event::SummaryProgress(heylisten::summarize::Progress::Writing(words)) => {
+            progress("Summarizing:", &format!("{words} words written"));
+            return;
+        }
+        _ => end_progress(),
+    }
     match event {
         Event::LoadingModel => eprintln!("Loading whisper model…"),
         Event::Diarizing(track) => eprintln!("Telling speakers apart on the {} track…", track.name()),
         Event::DiarizationFailed(track, why) => eprintln!("Couldn't tell speakers apart on the {} track ({why})", track.name()),
-        Event::Transcribing { track, percent } => {
-            eprint!("\rTranscribing {} track… {percent}%", track.name());
-            if percent >= 100 {
-                eprintln!();
-            }
-            let _ = std::io::stderr().flush();
-        }
+        Event::Transcribing { .. } | Event::SummaryProgress(_) => {}
         Event::SkippedSilentTrack(track) => {
             eprintln!("Skipping {} track: no speech", track.name());
             if track == heylisten::meeting::Track::System {

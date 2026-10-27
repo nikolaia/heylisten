@@ -2,6 +2,7 @@
 
 pub mod aec;
 pub mod audio;
+pub mod awake;
 pub mod capture;
 pub mod config;
 pub mod diarize;

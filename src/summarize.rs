@@ -57,8 +57,13 @@ impl<'a> Writer<'a> {
 
     /// One chat turn. With `json`, the reply is constrained to a JSON object.
     pub fn chat(&self, system: &str, user: &str, json: bool) -> Result<String> {
+        self.chat_with_progress(system, user, json, &mut |_| {})
+    }
+
+    /// `chat`, reporting progress where the engine can (the built-in one; Ollama can't).
+    pub fn chat_with_progress(&self, system: &str, user: &str, json: bool, on_progress: &mut dyn FnMut(Progress)) -> Result<String> {
         match &self.engine {
-            Engine::Builtin(server) => server.chat(system, user, json),
+            Engine::Builtin(server) => server.chat(system, user, json, on_progress),
             Engine::Ollama { url, model } => ollama::chat(url, model, self.num_ctx, system, user, json),
         }
     }
@@ -69,13 +74,13 @@ impl<'a> Writer<'a> {
     }
 
     /// Returns the summary Markdown. `on_part(i, n)` is called before each part when the
-    /// transcript is split.
-    pub fn summarize(&self, transcript: &Transcript, mut on_part: impl FnMut(usize, usize)) -> Result<String> {
+    /// transcript is split; `on_progress` reports how far the engine has got with the request.
+    pub fn summarize(&self, transcript: &Transcript, mut on_part: impl FnMut(usize, usize), on_progress: &mut dyn FnMut(Progress)) -> Result<String> {
         let path = prompt_path();
         let prompt = fs::read_to_string(&path).with_context(|| format!("can't read {}", path.display()))?;
         let parts = split(transcript, self.budget_chars(&prompt));
         if parts.len() == 1 {
-            return self.chat(&prompt, &format!("Transkripsjon:\n\n{}", parts[0]), false);
+            return self.chat_with_progress(&prompt, &format!("Transkripsjon:\n\n{}", parts[0]), false, on_progress);
         }
         let n = parts.len();
         let mut summaries = Vec::new();
@@ -85,14 +90,23 @@ impl<'a> Writer<'a> {
                 "Dette er del {} av {n} av et langt møte. Lag referat bare for denne delen.\n\nTranskripsjon:\n\n{part}",
                 i + 1
             );
-            summaries.push(format!("# Del {}\n\n{}", i + 1, self.chat(&prompt, &user, false)?));
+            summaries.push(format!("# Del {}\n\n{}", i + 1, self.chat_with_progress(&prompt, &user, false, on_progress)?));
         }
         let user = format!(
             "Her er referater av hver del av et langt møte, i rekkefølge. Slå dem sammen til ett referat for hele møtet.\n\n{}",
             summaries.join("\n\n")
         );
-        self.chat(&prompt, &user, false)
+        self.chat_with_progress(&prompt, &user, false, on_progress)
     }
+}
+
+/// How far the summary engine has got with a request.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Progress {
+    /// Reading the transcript (the prompt), in percent. The slow part for a long meeting.
+    Reading(u8),
+    /// Words of the reply written so far.
+    Writing(usize),
 }
 
 /// The summary model's name for the note's frontmatter.

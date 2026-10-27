@@ -4,7 +4,8 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 
 use anyhow::Result;
@@ -128,36 +129,99 @@ pub fn live_path(meeting_dir: &Path) -> PathBuf {
     meeting_dir.join("live.jsonl")
 }
 
-/// The transcriber thread. Returns the sender to feed chunks to; dropping every sender
-/// lets it finish the queue and exit. The thread returns Ok(()) if every chunk was transcribed.
-pub fn spawn(model: PathBuf, meeting_dir: PathBuf) -> Result<(mpsc::Sender<Chunk>, JoinHandle<Result<()>>)> {
+/// The audio waiting for the live transcriber. It grows when a Mac can't keep up during a
+/// meeting, and is what `stop` has to wait for.
+#[derive(Default)]
+pub struct Backlog {
+    chunks: AtomicUsize,
+    samples: AtomicU64,
+    /// Set at stop: the call is over and someone is waiting, so catch up at full priority.
+    hurry: std::sync::atomic::AtomicBool,
+}
+
+impl Backlog {
+    pub fn chunks(&self) -> usize {
+        self.chunks.load(Ordering::Relaxed)
+    }
+
+    pub fn seconds(&self) -> f32 {
+        self.samples.load(Ordering::Relaxed) as f32 / SECOND as f32
+    }
+
+    /// Catch up at full priority from the next chunk on.
+    pub fn hurry(&self) {
+        self.hurry.store(true, Ordering::Relaxed);
+    }
+
+    fn add(&self, chunk: &Chunk, sign: i64) {
+        let n = chunk.samples.len() as u64;
+        if sign > 0 {
+            self.chunks.fetch_add(1, Ordering::Relaxed);
+            self.samples.fetch_add(n, Ordering::Relaxed);
+        } else {
+            self.chunks.fetch_sub(1, Ordering::Relaxed);
+            self.samples.fetch_sub(n, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Where the tracks queue chunks for the live transcriber, counted in its backlog.
+#[derive(Clone)]
+pub struct Queue {
+    tx: mpsc::Sender<Chunk>,
+    backlog: Arc<Backlog>,
+}
+
+impl Queue {
+    /// A dead transcriber just means no live transcript.
+    pub fn send(&self, chunk: Chunk) {
+        self.backlog.add(&chunk, 1);
+        if let Err(mpsc::SendError(chunk)) = self.tx.send(chunk) {
+            self.backlog.add(&chunk, -1);
+        }
+    }
+}
+
+/// The transcriber thread. Returns the queue to feed chunks to (dropping every copy lets it
+/// finish and exit) and its backlog. The thread returns Ok(()) if every chunk was transcribed.
+pub fn spawn(model: PathBuf, meeting_dir: PathBuf) -> Result<(Queue, Arc<Backlog>, JoinHandle<Result<()>>)> {
     let (tx, rx) = mpsc::channel::<Chunk>();
+    let backlog = Arc::new(Backlog::default());
     let mut file = OpenOptions::new().create(true).append(true).open(live_path(&meeting_dir))?;
+    let done = backlog.clone();
     let handle = thread::spawn(move || {
-        background_priority();
+        set_priority(false);
         let mut transcriber = Transcriber::load(&model)?;
+        let mut hurrying = false;
         for chunk in rx {
+            if !hurrying && done.hurry.load(Ordering::Relaxed) {
+                set_priority(true);
+                hurrying = true;
+            }
             let offset_ms = chunk.start_sample * 1000 / SECOND;
             for segment in transcriber.transcribe(&chunk.samples, offset_ms, chunk.track.who())? {
                 writeln!(file, "{}", serde_json::to_string(&segment)?)?;
             }
             file.flush()?;
+            done.add(&chunk, -1);
         }
         Ok(())
     });
-    Ok((tx, handle))
+    Ok((Queue { tx, backlog: backlog.clone() }, backlog, handle))
 }
 
 /// Live transcription runs during video calls: give it a lower priority than the call. Audio
-/// capture runs on its own real-time threads and isn't affected.
-fn background_priority() {
+/// capture runs on its own real-time threads and isn't affected. After stop, someone is
+/// waiting for the note: full priority (`hurry`).
+fn set_priority(hurry: bool) {
     #[cfg(target_os = "macos")]
     unsafe {
-        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
+        let class = if hurry { libc::qos_class_t::QOS_CLASS_USER_INITIATED } else { libc::qos_class_t::QOS_CLASS_UTILITY };
+        libc::pthread_set_qos_class_self_np(class, 0);
     }
     #[cfg(not(target_os = "macos"))]
     unsafe {
-        libc::setpriority(libc::PRIO_PROCESS, 0, 10); // on Linux this affects only this thread
+        libc::setpriority(libc::PRIO_PROCESS, 0, if hurry { 0 } else { 10 }); // on Linux this affects only this thread
     }
 }
 

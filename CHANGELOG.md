@@ -4,7 +4,12 @@ What changed in each release. Each release's GitHub page shows its section from 
 
 ## [Unreleased]
 
+### Added
+- **Progress while making the note.** After stop, the menu and `heylisten stop` show how much is left of catching up on the live transcript ("about 2 min of audio left"), then how far the summary is: reading the meeting (percent), then words written. In a terminal the CLI draws a progress bar; piped or logged, it prints only the steps.
+- **A warning when live transcription falls behind** by more than a minute during a recording, in the menu and in `heylisten status`, mentioning Low Power Mode when it's on. `recorder.log` notes the backlog every minute, and when the mic stops delivering audio.
+
 ### Fixed
+- **Stopping no longer seems to hang on a slower or busy Mac.** macOS could slow heyListen down with App Nap while it ran in the background, and catching up on the live transcript ran at low priority with nothing shown. heyListen now tells macOS that recording and making a note are work you started (which also keeps the Mac from sleeping during a meeting), catches up at full priority, and shows its progress.
 - **Handovers name people.** "Over til deg, Sindre" or "Kan du ta resten, Kari?" now names whoever speaks next; before, only a name at the start of a sentence counted ("Kari, kan du…"). A remark like "Rosa, kanskje." doesn't: an address has to be a question or say "du", "deg" or "dere".
 - **You get your name too.** When the meeting makes it clear ("Kan du ta over, Torbjørn?"), `Meg` becomes your name in the note and the summary, listed in the frontmatter with its evidence like everyone else's.
 

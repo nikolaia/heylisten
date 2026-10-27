@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -27,12 +27,16 @@ pub struct Recorder {
     system: Option<System>,
     writers: Vec<JoinHandle<Result<()>>>,
     live: JoinHandle<Result<()>>,
+    /// The audio waiting for the live transcriber.
+    pub backlog: Arc<live::Backlog>,
+    /// When the mic last delivered audio (`capture::now_ns`).
+    mic_heard: Arc<AtomicU64>,
 }
 
 impl Recorder {
     /// `debug` logs how much audio each track receives, every second.
     pub fn start(meeting: &Meeting, whisper_model: &Path, debug: bool) -> Result<Recorder> {
-        let (live_tx, live) = live::spawn(whisper_model.to_path_buf(), meeting.dir())?;
+        let (live_tx, backlog, live) = live::spawn(whisper_model.to_path_buf(), meeting.dir())?;
         // The system track is the echo reference for the mic.
         let loopback = Arc::new(Mutex::new(Loopback::default()));
         let echo = match Aec::new() {
@@ -60,12 +64,20 @@ impl Recorder {
         };
         let (mic_tx, mic_writer) = track_writer(meeting, Track::Mic, live_tx.clone(), echo, debug)?;
         let (sys_tx, sys_writer) = track_writer(meeting, Track::System, live_tx, Echo::Reference(loopback), debug)?;
-        let mic = Mic::start(Box::new(move |s, rate, at| drop(mic_tx.send((s.to_vec(), rate, at)))), debug)?;
+        let mic_heard = Arc::new(AtomicU64::new(capture::now_ns()));
+        let heard = mic_heard.clone();
+        let mic = Mic::start(
+            Box::new(move |s, rate, at| {
+                heard.store(capture::now_ns(), Ordering::Relaxed);
+                drop(mic_tx.send((s.to_vec(), rate, at)));
+            }),
+            debug,
+        )?;
         let system = System::start(Box::new(move |s, rate, at| drop(sys_tx.send((s.to_vec(), rate, at)))))?;
         // Always logged, so a bad recording can be traced to the device it came from.
         log(&format!("mic: {} ({} Hz, {} ch)", mic.device, mic.rate, mic.channels));
         log(&format!("system audio: tap of everything except heyListen, output device {}", system.device));
-        Ok(Recorder { mic: Some(mic), system: Some(system), writers: vec![mic_writer, sys_writer], live })
+        Ok(Recorder { mic: Some(mic), system: Some(system), writers: vec![mic_writer, sys_writer], live, backlog, mic_heard })
     }
 
     /// Stops capture and waits until both files are complete and the live transcript has caught up.
@@ -287,7 +299,7 @@ const ECHO_WAIT: usize = audio::SAMPLE_RATE as usize / 2;
 struct Output {
     wav: WavWriter,
     chunker: Chunker,
-    live: mpsc::Sender<live::Chunk>,
+    live: live::Queue,
     echo: Echo,
 }
 
@@ -313,7 +325,7 @@ impl Output {
         let mut chunks = Vec::new();
         self.chunker.finish(&mut chunks);
         for chunk in chunks {
-            let _ = self.live.send(chunk);
+            self.live.send(chunk);
         }
         self.wav.finish()?;
         Ok(())
@@ -323,9 +335,8 @@ impl Output {
         self.wav.write(samples)?;
         let mut chunks = Vec::new();
         self.chunker.push(samples, &mut chunks);
-        // A dead transcriber just means no live transcript.
         for chunk in chunks {
-            let _ = self.live.send(chunk);
+            self.live.send(chunk);
         }
         Ok(())
     }
@@ -335,7 +346,7 @@ impl Output {
 fn track_writer(
     meeting: &Meeting,
     track: Track,
-    live: mpsc::Sender<live::Chunk>,
+    live: live::Queue,
     echo: Echo,
     debug: bool,
 ) -> Result<(mpsc::Sender<Audio>, JoinHandle<Result<()>>)> {
@@ -417,11 +428,16 @@ pub fn log(line: &str) {
 struct State {
     pid: i32,
     meeting: String,
+    /// Seconds of audio waiting for the live transcript: while recording, how far behind it is;
+    /// after stop, what it still has to get through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    backlog_s: Option<f32>,
 }
 
 pub enum Status {
     Idle,
-    Recording { meeting: Meeting, pid: i32 },
+    /// `behind_s`: seconds of audio the live transcript hasn't got to yet.
+    Recording { meeting: Meeting, pid: i32, behind_s: f32 },
     /// The recorder process is gone without being stopped; its audio is still on disk.
     Died { meeting: Meeting },
 }
@@ -438,7 +454,7 @@ pub fn status() -> Result<Status> {
     let Ok(text) = fs::read_to_string(state_path()) else { return Ok(Status::Idle) };
     let state: State = serde_json::from_str(&text)?;
     let meeting = Meeting::load(&state.meeting)?;
-    Ok(if alive(state.pid) { Status::Recording { meeting, pid: state.pid } } else { Status::Died { meeting } })
+    Ok(if alive(state.pid) { Status::Recording { meeting, pid: state.pid, behind_s: state.backlog_s.unwrap_or(0.0) } } else { Status::Died { meeting } })
 }
 
 /// Starts a recorder process (`exe __record <id>`) for a new meeting.
@@ -543,14 +559,23 @@ fn launch(exe: &Path, meeting_id: &str, log: &Path) -> Result<()> {
 }
 
 /// Stops the recorder process and waits for it to finish writing. Returns the meeting.
-pub fn stop() -> Result<Meeting> {
+/// Stops the recording. The recorder first finishes the live transcript, with no time limit;
+/// `on_progress` hears how many seconds of audio it still has to get through.
+pub fn stop(mut on_progress: impl FnMut(f32)) -> Result<Meeting> {
     let meeting = match status()? {
         Status::Idle => bail!("not recording"),
         Status::Died { meeting } => meeting,
         Status::Recording { pid, .. } => {
-            // No time limit: the recorder finishes the live transcript before it exits.
             unsafe { libc::kill(pid, libc::SIGINT) };
+            let mut reported = None;
             while alive(pid) {
+                let left = fs::read_to_string(state_path()).ok().and_then(|t| serde_json::from_str::<State>(&t).ok()).and_then(|s| s.backlog_s);
+                if let Some(left) = left
+                    && reported != Some(left.round())
+                {
+                    on_progress(left);
+                    reported = Some(left.round());
+                }
                 thread::sleep(Duration::from_millis(100));
             }
             let text = fs::read_to_string(state_path())?;
@@ -580,14 +605,89 @@ pub fn run(config: &Config, meeting_id: &str) -> Result<()> {
         libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
         libc::signal(libc::SIGHUP, libc::SIG_IGN);
     }
-    let state = State { pid: std::process::id() as i32, meeting: meeting.id.clone() };
+    let _awake = crate::awake::Activity::begin("Recording a meeting");
+    let mut state = State { pid: std::process::id() as i32, meeting: meeting.id.clone(), backlog_s: None };
     fs::write(state_path(), serde_json::to_string(&state)?)?;
     let recorder = Recorder::start(&meeting, &config.whisper_model, config.debug).context("can't start recording")?;
     RECORDING.store(true, Ordering::SeqCst);
+    let mut next_report = Instant::now() + BACKLOG_EVERY;
+    let mut next_state = Instant::now();
+    let mut mic_quiet = false;
     while !STOP.load(Ordering::SeqCst) {
         thread::sleep(Duration::from_millis(100));
+        // A mic that stops delivering audio (a headset disconnected, or taken by another app).
+        let quiet = capture::now_ns().saturating_sub(recorder.mic_heard.load(Ordering::Relaxed)) > MIC_QUIET_NS;
+        if quiet != mic_quiet {
+            log(if quiet { "mic: no audio for 5 s (disconnected, or taken by another app?)" } else { "mic: audio again" });
+            mic_quiet = quiet;
+        }
+        // Whether this Mac keeps up: what's left at stop has to be transcribed before the note.
+        // In the state file for the menu and `status`, and in the log for problem reports.
+        if Instant::now() >= next_state {
+            state.backlog_s = Some(recorder.backlog.seconds());
+            let _ = fs::write(state_path(), serde_json::to_string(&state)?);
+            next_state += Duration::from_secs(5);
+        }
+        if Instant::now() >= next_report {
+            log(&format!("live transcript: {:.0} s of audio waiting ({} chunks)", recorder.backlog.seconds(), recorder.backlog.chunks()));
+            next_report += BACKLOG_EVERY;
+        }
     }
     meeting.end = Local::now();
+    recorder.backlog.hurry();
+    // While the live transcript catches up, tell `stop` how much is left.
+    let finished = Arc::new(AtomicBool::new(false));
+    let reporter = {
+        let (backlog, finished) = (recorder.backlog.clone(), finished.clone());
+        thread::spawn(move || {
+            while !finished.load(Ordering::SeqCst) {
+                state.backlog_s = Some(backlog.seconds());
+                let _ = fs::write(state_path(), serde_json::to_string(&state).unwrap_or_default());
+                thread::sleep(Duration::from_millis(500));
+            }
+        })
+    };
     meeting.live_complete = recorder.stop()?;
+    finished.store(true, Ordering::SeqCst);
+    let _ = reporter.join();
     meeting.save()
+}
+
+/// How often the live transcript's backlog is logged while recording.
+const BACKLOG_EVERY: Duration = Duration::from_secs(60);
+/// A mic silent for this long is logged: it normally delivers audio every few milliseconds.
+const MIC_QUIET_NS: u64 = 5_000_000_000;
+
+/// Live transcription this far behind is worth a warning: stopping will take a while.
+pub const BEHIND_WARNING_S: f32 = 60.0;
+
+/// "about 42 s", "about 3 min".
+pub fn describe_seconds(seconds: f32) -> String {
+    match seconds.round() as u64 {
+        s if s < 90 => format!("about {s} s"),
+        s => format!("about {} min", (s + 30) / 60),
+    }
+}
+
+/// "about 2 min of audio left", for showing stop's progress.
+pub fn describe_left(seconds: f32) -> String {
+    if seconds < 0.5 { "almost done".into() } else { format!("{} of audio left", describe_seconds(seconds)) }
+}
+
+/// Live transcription is falling behind, and so the note will take longer after stop.
+pub fn behind_warning(behind_s: f32) -> String {
+    let why = if crate::awake::low_power_mode() { " Low Power Mode is on, which slows it down." } else { "" };
+    format!("Live transcription is {} behind, so the note will take longer after stop.{why}", describe_seconds(behind_s))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn describes_what_is_left() {
+        assert_eq!(describe_left(0.2), "almost done");
+        assert_eq!(describe_left(42.0), "about 42 s of audio left");
+        assert_eq!(describe_left(150.0), "about 3 min of audio left");
+    }
 }

@@ -7,9 +7,9 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
 
 use crate::config::{data_dir, models_dir};
+use crate::summarize::Progress;
 
 /// llama.cpp release, pinned.
 const LLAMA_RELEASE: &str = "b11321";
@@ -128,22 +128,14 @@ impl Server {
         Ok(server)
     }
 
-    /// One chat turn: system prompt + user message → reply.
-    pub fn chat(&self, system: &str, user: &str, json: bool) -> Result<String> {
-        #[derive(Deserialize)]
-        struct Reply {
-            choices: Vec<Choice>,
-        }
-        #[derive(Deserialize)]
-        struct Choice {
-            message: Message,
-        }
-        #[derive(Deserialize)]
-        struct Message {
-            content: String,
-        }
+    /// One chat turn: system prompt + user message → reply. Streamed, so `on_progress` hears
+    /// how far the model has read the prompt, then how many words it has written.
+    pub fn chat(&self, system: &str, user: &str, json: bool, on_progress: &mut dyn FnMut(Progress)) -> Result<String> {
+        use std::io::BufRead;
         let mut body = serde_json::json!({
             "temperature": 0.2,
+            "stream": true,
+            "return_progress": true,
             "messages": [
                 { "role": "system", "content": system },
                 { "role": "user", "content": user },
@@ -152,13 +144,36 @@ impl Server {
         if json {
             body["response_format"] = serde_json::json!({ "type": "json_object" });
         }
-        let reply: Reply = agent(Duration::from_secs(30 * 60))
+        let mut response = agent(Duration::from_secs(30 * 60))
             .post(format!("http://127.0.0.1:{}/v1/chat/completions", self.port))
             .header("Authorization", format!("Bearer {}", self.key))
-            .send_json(body)?
-            .body_mut()
-            .read_json()?;
-        let content = reply.choices.into_iter().next().context("empty reply from the summary engine")?.message.content;
+            .send_json(body)?;
+        // Server-sent events: "data: {…}" lines, then "data: [DONE]".
+        let mut content = String::new();
+        for line in std::io::BufReader::new(response.body_mut().as_reader()).lines() {
+            let line = line?;
+            let Some(data) = line.strip_prefix("data: ") else { continue };
+            if data == "[DONE]" {
+                break;
+            }
+            let event: serde_json::Value = serde_json::from_str(data)?;
+            if let Some(p) = event.get("prompt_progress") {
+                let count = |key: &str| p.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+                let (total, done) = (count("total").saturating_sub(count("cache")), count("processed").saturating_sub(count("cache")));
+                if let Some(percent) = (done * 100).checked_div(total) {
+                    on_progress(Progress::Reading(percent.min(100) as u8));
+                }
+            }
+            if let Some(text) = event.pointer("/choices/0/delta/content").and_then(|c| c.as_str())
+                && !text.is_empty()
+            {
+                content.push_str(text);
+                on_progress(Progress::Writing(content.split_whitespace().count()));
+            }
+        }
+        if content.trim().is_empty() {
+            anyhow::bail!("empty reply from the summary engine");
+        }
         Ok(content.trim().to_string())
     }
 }
