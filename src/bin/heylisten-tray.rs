@@ -44,19 +44,32 @@ enum State {
     /// the meeting, and a new recording waits until then.
     Died(Meeting),
     /// Making the note after stop, or downloading models. `String` is the current step.
-    Busy(String),
+    Busy(Job, String),
 }
 
-/// Menu items whose text or presence changes.
+/// What a busy tray is doing.
+#[derive(Clone, Copy)]
+enum Job {
+    Setup,
+    Note,
+}
+
+/// The menu's items. The menu shows only what can be done right now: it's rebuilt from these
+/// whenever that changes (see `Tray::refresh`).
 struct Items {
-    status: MenuItem,
+    /// What's going on, in a few words: "Ready to record", "Recording "Standup"".
+    headline: MenuItem,
+    /// Under it, only when there's something to add: elapsed time, progress, a hint, an error.
+    detail: MenuItem,
+    start: MenuItem,
     download: MenuItem,
     install_ollama: MenuItem,
-    start: MenuItem,
     stop: MenuItem,
     /// Stop with only the transcript: no speakers, names or summary.
     stop_quick: MenuItem,
     recent: Submenu,
+    /// Summary model, notes folder and debug mode, out of the way of everyday use.
+    settings: Submenu,
     summary: Submenu,
     notes_dir: MenuItem,
     debug: CheckMenuItem,
@@ -86,9 +99,8 @@ struct Tray {
     recording: Vec<Icon>,
     frame: usize,
     started: Instant,
-    /// Whether the setup items are in the menu right now.
-    shown_download: bool,
-    shown_install: bool,
+    /// What the menu holds right now: the actions offered, and whether there's a detail line.
+    shape: (Vec<MenuId>, bool),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -144,37 +156,26 @@ fn run() -> Result<()> {
     spawn_checker(proxy.clone());
 
     let items = Items {
-        status: MenuItem::new("Checking setup…", false, None),
+        headline: MenuItem::new("Checking setup…", false, None),
+        detail: MenuItem::new("", false, None),
+        start: MenuItem::new("Start recording", true, None),
         download: MenuItem::new("Download models…", true, None),
-        install_ollama: MenuItem::new("Install Ollama (for summaries)…", true, None),
-        start: MenuItem::new("Start recording", false, None),
-        stop: MenuItem::new("Stop recording", false, None),
-        stop_quick: MenuItem::new("Stop without summary", false, None),
+        install_ollama: MenuItem::new("Install Ollama for summaries…", true, None),
+        stop: MenuItem::new("Stop and make note", true, None),
+        stop_quick: MenuItem::new("Stop with transcript only", true, None),
         recent: Submenu::new("Recent notes", false),
+        settings: Submenu::new("Settings", true),
         summary: Submenu::new("Summary model", true),
-        notes_dir: MenuItem::new("Set notes location…", true, None),
-        debug: CheckMenuItem::new("Debug mode (keep recordings 7 days)", true, config.debug, None),
-        about: MenuItem::new("About heyListen…", true, None),
+        notes_dir: MenuItem::new("Change notes folder…", true, None),
+        debug: CheckMenuItem::new("Keep recordings for 7 days (debug)", true, config.debug, None),
+        about: MenuItem::new("About heyListen", true, None),
         report: MenuItem::new("Report a problem…", true, None),
         quit: MenuItem::new("Quit heyListen", true, None),
     };
+    items.settings.append_items(&[&items.summary, &items.notes_dir, &PredefinedMenuItem::separator(), &items.debug])?;
+    // Filled in by the first refresh.
     let menu = Menu::new();
-    menu.append_items(&[
-        &items.status,
-        &PredefinedMenuItem::separator(),
-        &items.start,
-        &items.stop,
-        &items.stop_quick,
-        &PredefinedMenuItem::separator(),
-        &items.recent,
-        &items.summary,
-        &items.notes_dir,
-        &PredefinedMenuItem::separator(),
-        &items.debug,
-        &items.about,
-        &items.report,
-        &items.quit,
-    ])?;
+    menu.append(&items.headline)?;
 
     let mut items = Some(items);
     let mut tray: Option<Tray> = None;
@@ -209,8 +210,7 @@ fn run() -> Result<()> {
                     recording: breathing(RECORDING_BREATH, SLOW_FRAME, ([230, 50, 50], 0.85), ([230, 50, 50], 1.0)),
                     frame: 0,
                     started: Instant::now(),
-                    shown_download: false,
-                    shown_install: false,
+                    shape: (Vec::new(), false),
                 });
             }
             Event::UserEvent(UserEvent::Menu(e)) => {
@@ -222,10 +222,10 @@ fn run() -> Result<()> {
                     spawn_start(cli.clone(), proxy.clone());
                 } else if id == t.items.stop.id() || id == t.items.stop_quick.id() {
                     let mode = if id == t.items.stop.id() { Mode::Full } else { Mode::TranscriptOnly };
-                    t.state = State::Busy("Stopping…".into());
+                    t.state = State::Busy(Job::Note, "Stopping…".into());
                     spawn_stop(config.clone(), mode, proxy.clone());
                 } else if id == t.items.download.id() {
-                    t.state = State::Busy("Starting download…".into());
+                    t.state = State::Busy(Job::Setup, "Starting download…".into());
                     t.error = None;
                     spawn_setup(config.clone(), proxy.clone());
                 } else if id == t.items.install_ollama.id() {
@@ -238,7 +238,7 @@ fn run() -> Result<()> {
                     if let Some(dir) = picked
                         && let Err(e) = config.set_notes_dir(&dir)
                     {
-                        t.error = Some(format!("Couldn't save the notes location: {e:#}"));
+                        t.error = Some(format!("Couldn't save the notes folder: {e:#}"));
                     }
                 } else if id == t.items.debug.id() {
                     // The checkbox has already toggled itself.
@@ -267,7 +267,7 @@ fn run() -> Result<()> {
                 if let Some(t) = tray.as_mut()
                     && let Some(mode) = reopened(t)
                 {
-                    t.state = State::Busy("Stopping…".into());
+                    t.state = State::Busy(Job::Note, "Stopping…".into());
                     spawn_stop(config.clone(), mode, proxy.clone());
                 }
             }
@@ -290,7 +290,8 @@ fn run() -> Result<()> {
             }
             Event::UserEvent(UserEvent::Busy(step)) => {
                 if let Some(t) = tray.as_mut() {
-                    t.state = State::Busy(step);
+                    let job = if let State::Busy(job, _) = t.state { job } else { Job::Note };
+                    t.state = State::Busy(job, step);
                 }
             }
             Event::UserEvent(UserEvent::Done(result)) => {
@@ -347,58 +348,76 @@ impl Tray {
                 _ => State::Idle,
             };
         }
-        let idle = matches!(self.state, State::Idle);
-        let needs_speech = self.needs.as_ref().is_none_or(|n| n.whisper_model);
-
+        let ready = self.needs.as_ref().is_some_and(|n| !n.whisper_model);
+        let behind = (self.behind_s >= recorder::BEHIND_WARNING_S).then(|| {
+            let power = if heylisten::awake::low_power_mode() { " (Low Power Mode is on)" } else { "" };
+            format!("transcription {} behind{power}", recorder::describe_seconds(self.behind_s))
+        });
         // Only in the menu, never next to the icon: a wider menu bar item is the first that
         // macOS hides behind the camera notch when the menu bar is full.
-        let text = match &self.state {
-            State::Idle => match (&self.error, &self.needs) {
-                (Some(e), _) => e.clone(),
-                (None, None) => "Checking setup…".into(),
-                (None, Some(n)) if n.whisper_model => "Setup needed: download the models to start".into(),
-                (None, Some(n)) if n.ollama_missing => "Ready (summaries need Ollama running)".into(),
-                (None, Some(n)) if n.engine || n.summary_model => "Ready (download the Norwegian summary model for summaries)".into(),
-                (None, Some(_)) => "Ready".into(),
-            },
-            State::Starting => "Starting…".into(),
-            State::Recording(m) if self.behind_s >= recorder::BEHIND_WARNING_S => {
-                format!("Recording '{}' · {} · {}", m.title, elapsed(m), recorder::behind_warning(self.behind_s))
+        let (headline, detail, actions): (String, Option<String>, Vec<&MenuItem>) = match &self.state {
+            State::Idle if self.needs.is_none() => ("Checking setup…".into(), None, vec![]),
+            State::Idle if !ready => {
+                let n = self.needs.as_ref().unwrap();
+                set_text(&self.items.download, &format!("Download models ({:.1} GB)…", n.download_bytes() as f64 / 1e9));
+                let mut actions = vec![&self.items.download];
+                if n.ollama_missing {
+                    actions.push(&self.items.install_ollama);
+                }
+                ("Setup needed".into(), Some(self.error.clone().unwrap_or_else(|| "Download the models to start recording".into())), actions)
             }
-            State::Recording(m) => format!("Recording '{}' · {}", m.title, elapsed(m)),
-            State::Died(m) => format!("Recording '{}' stopped unexpectedly. The audio so far is saved", m.title),
-            State::Busy(step) => step.clone(),
-        };
-        set_text(&self.items.status, &text);
-        set_enabled(&self.items.start, idle && !needs_speech);
-        let stoppable = matches!(self.state, State::Recording(_) | State::Died(_));
-        set_enabled(&self.items.stop, stoppable);
-        set_enabled(&self.items.stop_quick, stoppable);
-        let (stop, quick) = match &self.state {
-            State::Died(m) => (format!("Finish '{}' (make its note)", m.title), "Finish without summary"),
-            _ => ("Stop recording".into(), "Stop without summary"),
-        };
-        set_text(&self.items.stop, &stop);
-        set_text(&self.items.stop_quick, quick);
-
-        // Setup items appear only while something is missing.
-        if let Some(n) = &self.needs {
-            let download = idle && n.downloadable();
-            if download {
-                set_text(&self.items.download, &format!("Download models (~{:.1} GB)…", n.download_bytes() as f64 / 1e9));
+            State::Idle => {
+                let n = self.needs.as_ref().unwrap();
+                let hint = if n.ollama_missing {
+                    Some("Summaries need Ollama running".to_string())
+                } else if n.engine || n.summary_model {
+                    Some("Download the summary model for summaries".to_string())
+                } else {
+                    None
+                };
+                let mut actions = vec![&self.items.start];
+                if n.downloadable() {
+                    set_text(&self.items.download, &format!("Download summary model ({:.1} GB)…", n.download_bytes() as f64 / 1e9));
+                    actions.push(&self.items.download);
+                }
+                if n.ollama_missing {
+                    actions.push(&self.items.install_ollama);
+                }
+                ("Ready to record".into(), self.error.clone().or(hint), actions)
             }
-            self.shown_download = show(&self.menu, &self.items.download, 1, download, self.shown_download);
-            let install = n.ollama_missing;
-            let at = 1 + self.shown_download as usize;
-            self.shown_install = show(&self.menu, &self.items.install_ollama, at, install, self.shown_install);
+            State::Starting => ("Starting…".into(), None, vec![]),
+            State::Recording(m) => {
+                set_text(&self.items.stop, "Stop and make note");
+                set_text(&self.items.stop_quick, "Stop with transcript only");
+                let detail = match &behind {
+                    Some(behind) => format!("{}, {behind}", elapsed(m)),
+                    None => elapsed(m),
+                };
+                (format!("Recording \u{201c}{}\u{201d}", m.title), Some(detail), vec![&self.items.stop, &self.items.stop_quick])
+            }
+            State::Died(m) => {
+                set_text(&self.items.stop, "Finish and make note");
+                set_text(&self.items.stop_quick, "Finish with transcript only");
+                let detail = format!("\u{201c}{}\u{201d}: the audio so far is saved", m.title);
+                ("Recording stopped unexpectedly".into(), Some(detail), vec![&self.items.stop, &self.items.stop_quick])
+            }
+            State::Busy(Job::Setup, step) => ("Setting up".into(), Some(step.clone()), vec![]),
+            State::Busy(Job::Note, step) => ("Making the note".into(), Some(step.clone()), vec![]),
+        };
+        set_text(&self.items.headline, &headline);
+        set_text(&self.items.detail, &detail.as_deref().map(one_line).unwrap_or_default());
+        let shape = (actions.iter().map(|a| a.id().clone()).collect::<Vec<_>>(), detail.is_some());
+        if shape != self.shape {
+            self.rebuild(&actions, detail.is_some());
+            self.shape = shape;
         }
         self.set_summary_choices(config);
         let dir = config.notes_dir.file_name().map_or_else(|| config.notes_dir.display().to_string(), |n| n.to_string_lossy().into());
-        set_text(&self.items.notes_dir, &format!("Set notes location… ({dir})"));
+        set_text(&self.items.notes_dir, &format!("Change notes folder (\u{201c}{dir}\u{201d})…"));
 
         let look = match self.state {
             State::Recording(_) => Look::Recording,
-            State::Starting | State::Busy(_) => Look::Busy,
+            State::Starting | State::Busy(..) => Look::Busy,
             State::Idle | State::Died(_) => Look::Idle,
         };
         let frames = match look {
@@ -421,6 +440,32 @@ impl Tray {
             None => {}
         }
         self.shown_icon = look;
+    }
+
+    /// Puts the menu together: what's going on, what can be done now, then the same few
+    /// things every time. The items keep their text and state between rebuilds.
+    fn rebuild(&self, actions: &[&MenuItem], detail: bool) {
+        while self.menu.remove_at(0).is_some() {}
+        let _ = self.menu.append(&self.items.headline);
+        if detail {
+            let _ = self.menu.append(&self.items.detail);
+        }
+        if !actions.is_empty() {
+            let _ = self.menu.append(&PredefinedMenuItem::separator());
+            for action in actions {
+                let _ = self.menu.append(*action);
+            }
+        }
+        let i = &self.items;
+        let _ = self.menu.append_items(&[
+            &PredefinedMenuItem::separator(),
+            &i.recent,
+            &i.settings,
+            &PredefinedMenuItem::separator(),
+            &i.about,
+            &i.report,
+            &i.quit,
+        ]);
     }
 
     /// Rebuilds the Summary model submenu: the built-in Borealis, plus whatever Ollama has.
@@ -474,20 +519,13 @@ fn set_text(item: &MenuItem, text: &str) {
     }
 }
 
-fn set_enabled(item: &MenuItem, enabled: bool) {
-    if item.is_enabled() != enabled {
-        item.set_enabled(enabled);
+/// A detail line fits the menu: the first line, cut at about 80 characters.
+fn one_line(text: &str) -> String {
+    let line = text.lines().next().unwrap_or_default();
+    match line.char_indices().nth(80) {
+        Some((cut, _)) => format!("{}…", line[..cut].trim_end()),
+        None => line.to_string(),
     }
-}
-
-/// Adds or removes a menu item. Returns whether it's shown now.
-fn show(menu: &Menu, item: &MenuItem, at: usize, wanted: bool, shown: bool) -> bool {
-    if wanted && !shown {
-        let _ = menu.insert(item, at);
-    } else if !wanted && shown {
-        let _ = menu.remove(item);
-    }
-    wanted
 }
 
 /// Ollama lists `name:latest` for models pulled without a tag.
@@ -509,7 +547,7 @@ fn reopened(t: &Tray) -> Option<Mode> {
     let (what, stop) = match &t.state {
         State::Recording(m) => (format!("heyListen is recording '{}' ({}).", m.title, elapsed(m)), Some("Stop recording")),
         State::Died(m) => (format!("Recording '{}' stopped unexpectedly. The audio so far is saved.", m.title), Some("Finish it")),
-        State::Busy(step) => (format!("heyListen is busy: {step}"), None),
+        State::Busy(_, step) => (format!("heyListen is busy: {step}"), None),
         State::Starting => ("heyListen is starting a recording.".into(), None),
         State::Idle => ("heyListen is running.".into(), None),
     };

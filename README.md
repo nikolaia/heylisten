@@ -71,15 +71,20 @@ Hei og velkommen, skal vi starte med budsjettet?
 3. Click the **ring ◯ in your menu bar** and choose **Download models (~8.4 GB)…**. This fetches the Norwegian speech model (1.1 GB), the summary engine (12 MB) and the Norwegian summary model (7.3 GB). Progress is shown in the menu. If Ollama already has Borealis, heyListen uses that copy and skips the 7.3 GB.
 4. Choose **Start recording**. On the first recording, macOS asks for permission to use the **microphone** and to **record system audio**. Allow both.
 
-| In the menu | |
+| In the menu bar | |
 |---|---|
 | ◯ ring | Idle |
-| 🔴 red dot + `00:12:34` | Recording |
+| 🔴 red dot | Recording; the menu shows for how long |
 | 🟠 orange dot | Making the note, or downloading models |
+
+The menu only offers what you can do right now: **Start recording** when idle, **Stop and make note** or **Stop with transcript only** while recording, and progress while the note is made. Below that, always:
+
+| | |
+|---|---|
 | **Recent notes** | Your last 10 notes; click to open |
-| **Summary model** | Built-in Borealis, or any model in your Ollama |
-| **Set notes location…** | Where notes go (default: Desktop) |
-| **About heyListen…** | The version, with links to GitHub and its release notes |
+| **Settings** | The summary model (built-in Borealis, or any model in your Ollama), where notes go (default: Desktop), and whether recordings are kept for 7 days |
+| **About heyListen** | The version, with links to GitHub and its release notes |
+| **Report a problem…** | Drafts a GitHub issue with the logs, after asking |
 
 To have heyListen start with your Mac, add it under System Settings → General → Login Items.
 
@@ -193,7 +198,7 @@ git config core.hooksPath .githooks                     # run check.sh before ev
 
 The build downloads sherpa-onnx and small speaker-recognition and voice-detection models, which get embedded in the binary. Pushing a `v*` tag runs [the release workflow](.github/workflows/release.yml), which builds the app and attaches the zip to a GitHub Release.
 
-**Debugging:** *Debug mode (keep recordings 7 days)* is on by default while heyListen is being tuned. Turn it off in the menu, or with `debug = false` in the config. It keeps each meeting's audio so `heylisten process <id>` can redo the note, and logs the devices, audio errors, how much audio each track receives, when the mic stops delivering audio, how far behind live transcription is (every minute), and the speaker turns to `recorder.log` in the meeting folder. **Kept audio is always deleted after 7 days**, whatever the settings; transcripts and notes stay.
+**Debugging:** *Keep recordings for 7 days (debug)* is on by default while heyListen is being tuned. Turn it off under **Settings** in the menu, or with `debug = false` in the config. It keeps each meeting's audio so `heylisten process <id>` can redo the note, and logs the devices, audio errors, how much audio each track receives, when the mic stops delivering audio, how far behind live transcription is (every minute), and the speaker turns to `recorder.log` in the meeting folder. **Kept audio is always deleted after 7 days**, whatever the settings; transcripts and notes stay.
 
 **Reporting a problem:** *Report a problem…* in the menu (or `heylisten report`) drafts a GitHub issue with your versions, a few settings and the last lines of the logs, with names, meeting titles and your home folder removed. It asks first, and only opens the draft in your browser: nothing is sent unless you review it and submit it there.
 
