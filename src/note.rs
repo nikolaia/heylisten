@@ -97,12 +97,31 @@ fn tasks_as_checkboxes(summary: &str) -> String {
                 in_tasks = line.trim() == "## Oppgaver";
             }
             match line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
-                Some(task) if in_tasks && !task.starts_with('[') && !task.trim().eq_ignore_ascii_case("ingen") => format!("- [ ] {task}"),
+                Some(task) if in_tasks && !task.trim().eq_ignore_ascii_case("ingen") => {
+                    let (mark, task) = match task.strip_prefix("[x] ") {
+                        Some(done) => ("x", done),
+                        None => (" ", task.strip_prefix("[ ] ").unwrap_or(task)),
+                    };
+                    format!("- [{mark}] {}", without_unknowns(task))
+                }
                 _ => line.to_string(),
             }
         })
         .collect();
     lines.join("\n")
+}
+
+/// Drops "frist: ikke oppgitt" and the like from a task's "(ansvarlig: …, frist: …)": models
+/// write them although the prompt says to leave out what wasn't said.
+fn without_unknowns(task: &str) -> String {
+    const UNKNOWN: [&str; 7] = ["ikke oppgitt", "ikke angitt", "ikke nevnt", "ikke spesifisert", "ukjent", "ingen", "-"];
+    let Some((text, details)) = task.trim_end().strip_suffix(')').and_then(|t| t.rsplit_once(" (")) else { return task.to_string() };
+    let known: Vec<&str> = details
+        .split(',')
+        .map(str::trim)
+        .filter(|part| part.split_once(':').is_none_or(|(_, value)| !UNKNOWN.contains(&value.trim().trim_end_matches('.').to_lowercase().as_str())))
+        .collect();
+    if known.is_empty() { text.to_string() } else { format!("{text} ({})", known.join(", ")) }
 }
 
 /// Writes `<dir>/<date> <title>.md`, never overwriting: adds ` (2)`, ` (3)`…
@@ -194,5 +213,14 @@ mod tests {
         meeting.title = "Møte 8:46".into();
         assert!(!has_default_title(&meeting));
         assert!(has_default_title(&Meeting { title: default_title(meeting.start), ..meeting }));
+    }
+
+    #[test]
+    fn tasks_leave_out_what_was_not_said() {
+        let summary = "## Oppgaver\n- [ ] Teste tilgang (ansvarlig: Taler 4, frist: ikke oppgitt)\n- Sende referat (ansvarlig: Ukjent, frist: Ikke oppgitt.)\n- [ ] Booke rom (frist: fredag)";
+        assert_eq!(
+            tasks_as_checkboxes(summary),
+            "## Oppgaver\n- [ ] Teste tilgang (ansvarlig: Taler 4)\n- [ ] Sende referat\n- [ ] Booke rom (frist: fredag)"
+        );
     }
 }

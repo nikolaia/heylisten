@@ -36,6 +36,10 @@ tags: [møte]
 ## Sammendrag
 Møtet handlet om å øke markedsføringsbudsjettet for neste år …
 
+## Markedsføringsbudsjett
+- Kari foreslo å øke budsjettet med 20 % for å nå flere kunder i Bergen.
+- Taler 2 mente økningen bør vente til tallene for tredje kvartal er klare.
+
 ## Oppgaver
 - [ ] Forberede tall for ledermøtet på fredag (ansvarlig: Taler 2)
 
@@ -52,7 +56,7 @@ Hei og velkommen, skal vi starte med budsjettet?
 - 🎚️ **Hears quiet voices, ignores noise.** A voice detector ([Silero VAD](https://github.com/snakers4/silero-vad)) decides what's speech by how it sounds, not how loud it is: a quiet mic still works, and music, typing and silence never reach the transcriber.
 - 🗣️ **Tells speakers apart**, both remote people and several people sharing one mic in a meeting room.
 - 🔁 **Echo cancellation** ([DTLN-aec](https://github.com/breizhn/DTLN-aec)): what your speakers play is subtracted from your mic, so the others' voices and music don't become your lines, even without headphones.
-- 📝 **Norwegian summary** from [Borealis](https://huggingface.co/NbAiLab/borealis-12b-gguf), run by heyListen itself through llama.cpp, with no extra install. If you use [Ollama](https://ollama.com), you can pick any of its models instead. You get a summary, decisions, `- [ ]` tasks and topics, and the prompt is a file you can edit.
+- 📝 **Norwegian summary** from [Borealis](https://huggingface.co/NbAiLab/borealis-12b-gguf), run by heyListen itself through llama.cpp, with no extra install. If you use [Ollama](https://ollama.com), you can pick any of its models instead. You get a short summary, a section per topic with what was said, why and by whom, decisions, `- [ ]` tasks and open questions. Its length follows the meeting, and the prompt is a file you can edit.
 - 📄 **Plain Markdown notes** with YAML frontmatter, so they work as-is in any notes app that reads Markdown.
 - 💾 **Crash-safe.** Audio streams to disk as it's recorded, so a crash or a closed terminal keeps everything recorded so far.
 

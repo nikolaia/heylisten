@@ -12,8 +12,8 @@ use crate::transcript::{Segment, Transcript};
 /// transcripts are summarized in parts.
 const MAX_CTX: u64 = 32_768;
 const MIN_CTX: u64 = 8_192;
-/// Room left for the model's answer.
-const ANSWER_TOKENS: u64 = 2_048;
+/// Room left for the model's answer: a long meeting gets a section per topic.
+const ANSWER_TOKENS: u64 = 3_072;
 /// Room for the prompt, when sizing the context.
 const PROMPT_ALLOWANCE: u64 = 4_000;
 /// Rough Norwegian token estimate. Errs on the safe side.
@@ -78,28 +78,55 @@ impl<'a> Writer<'a> {
     pub fn summarize(&self, transcript: &Transcript, mut on_part: impl FnMut(usize, usize), on_progress: &mut dyn FnMut(Progress)) -> Result<String> {
         let path = prompt_path();
         let prompt = fs::read_to_string(&path).with_context(|| format!("can't read {}", path.display()))?;
-        let parts = split(transcript, self.budget_chars(&prompt));
         // The prompt says «Meg» is whoever recorded; once Me has a name, «Meg» isn't there.
         let me = transcript.me.as_ref().map(|me| format!("«{}» er personen som tok opp møtet.\n\n", me.name)).unwrap_or_default();
+        let parts = split(transcript, self.budget_chars(&prompt));
         if parts.len() == 1 {
-            return self.chat_with_progress(&prompt, &format!("{me}Transkripsjon:\n\n{}", parts[0]), false, on_progress);
+            let user = format!("{me}Transkripsjon:\n\n{}\n\n{}", parts[0], reminder(parts[0].len()));
+            return self.chat_with_progress(&prompt, &user, false, on_progress);
         }
         let n = parts.len();
         let mut summaries = Vec::new();
         for (i, part) in parts.iter().enumerate() {
             on_part(i + 1, n);
             let user = format!(
-                "Dette er del {} av {n} av et langt møte. Lag referat bare for denne delen.\n\n{me}Transkripsjon:\n\n{part}",
-                i + 1
+                "Dette er del {} av {n} av et langt møte. Lag referat bare for denne delen.\n\n{me}Transkripsjon:\n\n{part}\n\n{}",
+                i + 1,
+                reminder(part.len())
             );
             summaries.push(format!("# Del {}\n\n{}", i + 1, self.chat_with_progress(&prompt, &user, false, on_progress)?));
         }
+        // Merging is where detail gets lost: say what to keep.
+        let whole: usize = parts.iter().map(String::len).sum();
         let user = format!(
-            "Her er referater av hver del av et langt møte, i rekkefølge. Slå dem sammen til ett referat for hele møtet.\n\n{me}{}",
-            summaries.join("\n\n")
+            "Her er referater av hver del av et langt møte, i rekkefølge. Slå dem sammen til ett referat for hele møtet, med de samme overskriftene. \
+             Ikke forkort: behold alle navn, tall, datoer, beslutninger, oppgaver og åpne spørsmål, og det som ble endret underveis. \
+             Slå sammen temaer som går igjen.\n\n{me}{}\n\n{}",
+            summaries.join("\n\n"),
+            reminder(whole)
         );
         self.chat_with_progress(&prompt, &user, false, on_progress)
     }
+}
+
+/// After the transcript, where a small model pays most attention: the headings again, and a
+/// length that follows the meeting (more topics for a longer one; never padding a short one).
+fn reminder(transcript_chars: usize) -> String {
+    let (min, max) = topic_sections(transcript_chars);
+    let sections = if min == max { format!("{min}") } else { format!("{min} til {max}") };
+    format!(
+        "Husk overskriftene fra instruksjonene. Skriv {sections} tema-avsnitt med konkrete punkter. \
+         Hvert punkt må komme fra transkripsjonen: ikke legg til tall, verktøy eller detaljer som ikke ble sagt. \
+         Et kort møte gir et kort referat; ikke fyll på med generelle setninger."
+    )
+}
+
+/// How many topic sections a transcript this long calls for: one per 4,000 characters at
+/// least (about 4 minutes of talk), one per 2,000 at most, within 1 to 8.
+fn topic_sections(transcript_chars: usize) -> (usize, usize) {
+    let min = transcript_chars.div_ceil(4_000).clamp(1, 5);
+    let max = (1 + transcript_chars.div_ceil(2_000)).clamp(2, 8);
+    (min, max.max(min))
 }
 
 /// How far the summary engine has got with a request.
@@ -166,5 +193,12 @@ mod tests {
         assert_eq!(parts.len(), 4);
         assert!(parts.iter().all(|p| p.starts_with("Andre: ")));
         assert_eq!(split(&transcript, 10_000).len(), 1);
+    }
+
+    #[test]
+    fn more_topics_for_longer_meetings() {
+        assert_eq!(topic_sections(800), (1, 2));
+        assert_eq!(topic_sections(12_000), (3, 7));
+        assert_eq!(topic_sections(60_000), (5, 8));
     }
 }
