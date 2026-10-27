@@ -2,7 +2,9 @@
 
 What changed in each release. Each release's GitHub page shows its section from this file.
 
-## [Unreleased]
+## [0.1.3] - 2026-10-27
+
+Fuller summaries, progress while the note is made, names for everyone, and a tidier menu.
 
 ### Added
 - **Fuller summaries.** The summary now has a section per topic with what was actually said, why, and by whom (numbers, names, reasons and alternatives as they were said), then decisions, tasks and open questions. Its length follows the meeting: more topics for a long meeting, and no padding for a short one. Long meetings summarized in parts keep every name, number, decision and task when the parts are merged. An unedited summary prompt is updated; an edited one is left alone.
@@ -15,6 +17,9 @@ What changed in each release. Each release's GitHub page shows its section from 
 - **Stopping no longer seems to hang on a slower or busy Mac.** macOS could slow heyListen down with App Nap while it ran in the background, and catching up on the live transcript ran at low priority with nothing shown. heyListen now tells macOS that recording and making a note are work you started (which also keeps the Mac from sleeping during a meeting), catches up at full priority, and shows its progress.
 - **Handovers name people.** "Over til deg, Sindre" or "Kan du ta resten, Kari?" now names whoever speaks next; before, only a name at the start of a sentence counted ("Kari, kan du…"). A remark like "Rosa, kanskje." doesn't: an address has to be a question or say "du", "deg" or "dere".
 - **You get your name too.** When the meeting makes it clear ("Kan du ta over, Torbjørn?"), `Meg` becomes your name in the note and the summary, listed in the frontmatter with its evidence like everyone else's.
+
+### Known limitations
+Still as in 0.1.0: not notarized by Apple (click *Open Anyway* under System Settings → Privacy & Security after each install or upgrade), Apple Silicon and macOS only, speaker separation still being tuned, debug mode on by default (audio kept 7 days), and no Teams mode yet.
 
 ## [0.1.2] - 2026-10-23
 
@@ -75,7 +80,7 @@ The first release. heyListen records, transcribes and summarizes Norwegian meeti
 - **Debug mode is on by default** while heyListen is being tuned: it keeps each meeting's audio for 7 days, so a note can be redone. Turn it off in the menu.
 - **Teams mode** (record only Teams, silence the mic while you're muted) isn't in this release.
 
-[Unreleased]: https://github.com/nikolaia/heylisten/compare/v0.1.2...HEAD
+[0.1.3]: https://github.com/nikolaia/heylisten/releases/tag/v0.1.3
 [0.1.2]: https://github.com/nikolaia/heylisten/releases/tag/v0.1.2
 [0.1.1]: https://github.com/nikolaia/heylisten/releases/tag/v0.1.1
 [0.1.0]: https://github.com/nikolaia/heylisten/releases/tag/v0.1.0
