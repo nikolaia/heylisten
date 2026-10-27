@@ -14,6 +14,7 @@ use heylisten::meeting::Meeting;
 use heylisten::pipeline::{self, Event, Mode};
 use heylisten::recorder::{self, Status as RecorderStatus};
 use heylisten::setup;
+use heylisten::summarize::Progress;
 
 /// Hey, listen! Local-only meeting transcripts and summaries.
 #[derive(Parser)]
@@ -225,26 +226,16 @@ fn bar(fraction: f32) -> String {
 
 fn print_event(meeting_id: &str, event: Event) {
     // Progress redraws its own line; anything else ends it first.
-    match event {
-        Event::Transcribing { track, percent } => {
-            progress(&format!("Transcribing the {} track", track.name()), &bar(percent as f32 / 100.0));
-            return;
-        }
-        Event::SummaryProgress(heylisten::summarize::Progress::Reading(percent)) => {
-            progress("Summarizing: reading the meeting", &bar(percent as f32 / 100.0));
-            return;
-        }
-        Event::SummaryProgress(heylisten::summarize::Progress::Writing(words)) => {
-            progress("Summarizing:", &format!("{words} words written"));
-            return;
-        }
-        _ => end_progress(),
+    if !matches!(event, Event::Transcribing { .. } | Event::SummaryProgress(_)) {
+        end_progress();
     }
     match event {
+        Event::Transcribing { track, percent } => progress(&format!("Transcribing the {} track", track.name()), &bar(percent as f32 / 100.0)),
+        Event::SummaryProgress(Progress::Reading(percent)) => progress("Summarizing: reading the meeting", &bar(percent as f32 / 100.0)),
+        Event::SummaryProgress(Progress::Writing(words)) => progress("Summarizing:", &format!("{words} words written")),
         Event::LoadingModel => eprintln!("Loading whisper model…"),
         Event::Diarizing(track) => eprintln!("Telling speakers apart on the {} track…", track.name()),
         Event::DiarizationFailed(track, why) => eprintln!("Couldn't tell speakers apart on the {} track ({why})", track.name()),
-        Event::Transcribing { .. } | Event::SummaryProgress(_) => {}
         Event::SkippedSilentTrack(track) => {
             eprintln!("Skipping {} track: no speech", track.name());
             if track == heylisten::meeting::Track::System {

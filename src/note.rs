@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::meeting::Meeting;
-use crate::transcript::{Naming, Transcript, Who};
+use crate::transcript::Transcript;
 
 /// A finished summary and the short name of the model that wrote it.
 pub struct Summary {
@@ -29,7 +29,7 @@ pub fn render(meeting: &Meeting, transcript: &Transcript, transcription_model: &
     let _ = writeln!(out, "end: \"{}\"", meeting.end.format("%H:%M"));
     let _ = writeln!(out, "duration_min: {duration_min}");
     let _ = writeln!(out, "speakers: [{}]", people.join(", "));
-    let named: Vec<(Who, &Naming)> = transcript.me.iter().map(|n| (Who::Me, n)).chain(transcript.names.iter().map(|(k, n)| (Who::Speaker(*k), n))).collect();
+    let named = transcript.named();
     if !named.is_empty() {
         // So a wrong name is easy to fix, by hand or by asking an LLM.
         let _ = writeln!(out, "# Speaker names were found in the transcript. To fix one, replace it everywhere in this note.");

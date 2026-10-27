@@ -89,6 +89,12 @@ impl Transcript {
         }
     }
 
+    /// Everyone with a name: Me first, then the speakers in order.
+    pub fn named(&self) -> Vec<(Who, &Naming)> {
+        let me = self.me.iter().map(|n| (Who::Me, n));
+        me.chain(self.names.iter().map(|(k, n)| (Who::Speaker(*k), n))).collect()
+    }
+
     /// How someone is shown: their name if it was found, otherwise "Meg", "Andre", "Taler N".
     pub fn label(&self, who: Who) -> String {
         let named = match who {

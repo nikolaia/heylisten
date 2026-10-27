@@ -36,7 +36,8 @@ pub struct Recorder {
 impl Recorder {
     /// `debug` logs how much audio each track receives, every second.
     pub fn start(meeting: &Meeting, whisper_model: &Path, debug: bool) -> Result<Recorder> {
-        let (live_tx, backlog, live) = live::spawn(whisper_model.to_path_buf(), meeting.dir())?;
+        let (live_tx, live) = live::spawn(whisper_model.to_path_buf(), meeting.dir())?;
+        let backlog = live_tx.backlog();
         // The system track is the echo reference for the mic.
         let loopback = Arc::new(Mutex::new(Loopback::default()));
         let echo = match Aec::new() {
@@ -558,9 +559,8 @@ fn launch(exe: &Path, meeting_id: &str, log: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Stops the recorder process and waits for it to finish writing. Returns the meeting.
-/// Stops the recording. The recorder first finishes the live transcript, with no time limit;
-/// `on_progress` hears how many seconds of audio it still has to get through.
+/// Stops the recording and returns the meeting. The recorder first finishes the live
+/// transcript, with no time limit; `on_progress` hears how many seconds of audio are left.
 pub fn stop(mut on_progress: impl FnMut(f32)) -> Result<Meeting> {
     let meeting = match status()? {
         Status::Idle => bail!("not recording"),

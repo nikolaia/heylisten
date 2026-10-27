@@ -4,7 +4,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 
@@ -136,7 +136,7 @@ pub struct Backlog {
     chunks: AtomicUsize,
     samples: AtomicU64,
     /// Set at stop: the call is over and someone is waiting, so catch up at full priority.
-    hurry: std::sync::atomic::AtomicBool,
+    hurry: AtomicBool,
 }
 
 impl Backlog {
@@ -153,15 +153,14 @@ impl Backlog {
         self.hurry.store(true, Ordering::Relaxed);
     }
 
-    fn add(&self, chunk: &Chunk, sign: i64) {
-        let n = chunk.samples.len() as u64;
-        if sign > 0 {
-            self.chunks.fetch_add(1, Ordering::Relaxed);
-            self.samples.fetch_add(n, Ordering::Relaxed);
-        } else {
-            self.chunks.fetch_sub(1, Ordering::Relaxed);
-            self.samples.fetch_sub(n, Ordering::Relaxed);
-        }
+    fn queued(&self, chunk: &Chunk) {
+        self.chunks.fetch_add(1, Ordering::Relaxed);
+        self.samples.fetch_add(chunk.samples.len() as u64, Ordering::Relaxed);
+    }
+
+    fn transcribed(&self, chunk: &Chunk) {
+        self.chunks.fetch_sub(1, Ordering::Relaxed);
+        self.samples.fetch_sub(chunk.samples.len() as u64, Ordering::Relaxed);
     }
 }
 
@@ -175,26 +174,30 @@ pub struct Queue {
 impl Queue {
     /// A dead transcriber just means no live transcript.
     pub fn send(&self, chunk: Chunk) {
-        self.backlog.add(&chunk, 1);
+        self.backlog.queued(&chunk);
         if let Err(mpsc::SendError(chunk)) = self.tx.send(chunk) {
-            self.backlog.add(&chunk, -1);
+            self.backlog.transcribed(&chunk); // never will be
         }
+    }
+
+    pub fn backlog(&self) -> Arc<Backlog> {
+        self.backlog.clone()
     }
 }
 
-/// The transcriber thread. Returns the queue to feed chunks to (dropping every copy lets it
-/// finish and exit) and its backlog. The thread returns Ok(()) if every chunk was transcribed.
-pub fn spawn(model: PathBuf, meeting_dir: PathBuf) -> Result<(Queue, Arc<Backlog>, JoinHandle<Result<()>>)> {
+/// The transcriber thread. Returns the queue to feed chunks to; dropping every copy lets it
+/// finish and exit. The thread returns Ok(()) if every chunk was transcribed.
+pub fn spawn(model: PathBuf, meeting_dir: PathBuf) -> Result<(Queue, JoinHandle<Result<()>>)> {
     let (tx, rx) = mpsc::channel::<Chunk>();
-    let backlog = Arc::new(Backlog::default());
+    let queue = Queue { tx, backlog: Arc::new(Backlog::default()) };
     let mut file = OpenOptions::new().create(true).append(true).open(live_path(&meeting_dir))?;
-    let done = backlog.clone();
+    let backlog = queue.backlog();
     let handle = thread::spawn(move || {
         set_priority(false);
         let mut transcriber = Transcriber::load(&model)?;
         let mut hurrying = false;
         for chunk in rx {
-            if !hurrying && done.hurry.load(Ordering::Relaxed) {
+            if !hurrying && backlog.hurry.load(Ordering::Relaxed) {
                 set_priority(true);
                 hurrying = true;
             }
@@ -203,11 +206,11 @@ pub fn spawn(model: PathBuf, meeting_dir: PathBuf) -> Result<(Queue, Arc<Backlog
                 writeln!(file, "{}", serde_json::to_string(&segment)?)?;
             }
             file.flush()?;
-            done.add(&chunk, -1);
+            backlog.transcribed(&chunk);
         }
         Ok(())
     });
-    Ok((Queue { tx, backlog: backlog.clone() }, backlog, handle))
+    Ok((queue, handle))
 }
 
 /// Live transcription runs during video calls: give it a lower priority than the call. Audio
