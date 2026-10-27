@@ -186,7 +186,8 @@ impl Queue {
 }
 
 /// The transcriber thread. Returns the queue to feed chunks to; dropping every copy lets it
-/// finish and exit. The thread returns Ok(()) if every chunk was transcribed.
+/// finish and exit. The thread returns Ok(()) if every chunk was transcribed, or the first
+/// error; after one, it only empties the queue.
 pub fn spawn(model: PathBuf, meeting_dir: PathBuf) -> Result<(Queue, JoinHandle<Result<()>>)> {
     let (tx, rx) = mpsc::channel::<Chunk>();
     let queue = Queue { tx, backlog: Arc::new(Backlog::default()) };
@@ -194,21 +195,30 @@ pub fn spawn(model: PathBuf, meeting_dir: PathBuf) -> Result<(Queue, JoinHandle<
     let backlog = queue.backlog();
     let handle = thread::spawn(move || {
         set_priority(false);
-        let mut transcriber = Transcriber::load(&model)?;
+        // After a failure the rest of the queue is only counted off, so the backlog stays true.
+        let mut transcriber = Transcriber::load(&model);
         let mut hurrying = false;
         for chunk in rx {
             if !hurrying && backlog.hurry.load(Ordering::Relaxed) {
                 set_priority(true);
                 hurrying = true;
             }
-            let offset_ms = chunk.start_sample * 1000 / SECOND;
-            for segment in transcriber.transcribe(&chunk.samples, offset_ms, chunk.track.who())? {
-                writeln!(file, "{}", serde_json::to_string(&segment)?)?;
+            if let Ok(t) = &mut transcriber {
+                let offset_ms = chunk.start_sample * 1000 / SECOND;
+                let written = (|| -> Result<()> {
+                    for segment in t.transcribe(&chunk.samples, offset_ms, chunk.track.who())? {
+                        writeln!(file, "{}", serde_json::to_string(&segment)?)?;
+                    }
+                    file.flush()?;
+                    Ok(())
+                })();
+                if let Err(e) = written {
+                    transcriber = Err(e);
+                }
             }
-            file.flush()?;
             backlog.transcribed(&chunk);
         }
-        Ok(())
+        transcriber.map(drop)
     });
     Ok((queue, handle))
 }

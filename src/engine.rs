@@ -148,15 +148,27 @@ impl Server {
             .post(format!("http://127.0.0.1:{}/v1/chat/completions", self.port))
             .header("Authorization", format!("Bearer {}", self.key))
             .send_json(body)?;
-        // Server-sent events: "data: {…}" lines, then "data: [DONE]".
+        // Server-sent events: "data: {…}" lines, then "data: [DONE]". A failure midway is an
+        // "error: {…}" line, or a "data: {…}" with an "error".
         let mut content = String::new();
+        let (mut words, mut in_word, mut finished) = (0, false, false);
         for line in std::io::BufReader::new(response.body_mut().as_reader()).lines() {
             let line = line?;
+            if let Some(error) = line.strip_prefix("error: ") {
+                bail!("the summary engine failed: {error}");
+            }
             let Some(data) = line.strip_prefix("data: ") else { continue };
             if data == "[DONE]" {
+                finished = true;
                 break;
             }
             let event: serde_json::Value = serde_json::from_str(data)?;
+            if let Some(error) = event.get("error") {
+                bail!("the summary engine failed: {error}");
+            }
+            if event.pointer("/choices/0/finish_reason").is_some_and(|r| !r.is_null()) {
+                finished = true;
+            }
             if let Some(p) = event.get("prompt_progress") {
                 let count = |key: &str| p.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
                 let (total, done) = (count("total").saturating_sub(count("cache")), count("processed").saturating_sub(count("cache")));
@@ -168,11 +180,26 @@ impl Server {
                 && !text.is_empty()
             {
                 content.push_str(text);
-                on_progress(Progress::Writing(content.split_whitespace().count()));
+                // Counted as it comes, and reported only when a word starts.
+                let before = words;
+                for c in text.chars() {
+                    if c.is_whitespace() {
+                        in_word = false;
+                    } else if !in_word {
+                        in_word = true;
+                        words += 1;
+                    }
+                }
+                if words != before {
+                    on_progress(Progress::Writing(words));
+                }
             }
         }
+        if !finished {
+            bail!("the summary engine stopped before it finished");
+        }
         if content.trim().is_empty() {
-            anyhow::bail!("empty reply from the summary engine");
+            bail!("empty reply from the summary engine");
         }
         Ok(content.trim().to_string())
     }

@@ -447,6 +447,20 @@ fn state_path() -> PathBuf {
     meetings_dir().with_file_name("recorder.json")
 }
 
+/// The state file, if it's there and readable.
+fn read_state() -> Option<State> {
+    fs::read_to_string(state_path()).ok().and_then(|t| serde_json::from_str(&t).ok())
+}
+
+/// Writes the state file whole: it's rewritten while `status` and `stop` read it, which must
+/// never see it half-written.
+fn write_state(state: &State) -> Result<()> {
+    let tmp = state_path().with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_string(state)?)?;
+    fs::rename(&tmp, state_path())?;
+    Ok(())
+}
+
 fn alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
@@ -569,7 +583,7 @@ pub fn stop(mut on_progress: impl FnMut(f32)) -> Result<Meeting> {
             unsafe { libc::kill(pid, libc::SIGINT) };
             let mut reported = None;
             while alive(pid) {
-                let left = fs::read_to_string(state_path()).ok().and_then(|t| serde_json::from_str::<State>(&t).ok()).and_then(|s| s.backlog_s);
+                let left = read_state().and_then(|s| s.backlog_s);
                 if let Some(left) = left
                     && reported != Some(left.round())
                 {
@@ -577,6 +591,10 @@ pub fn stop(mut on_progress: impl FnMut(f32)) -> Result<Meeting> {
                     reported = Some(left.round());
                 }
                 thread::sleep(Duration::from_millis(100));
+            }
+            // It may have finished between two looks: nothing is left now.
+            if reported.is_some_and(|r| r != 0.0) {
+                on_progress(0.0);
             }
             let text = fs::read_to_string(state_path())?;
             Meeting::load(&serde_json::from_str::<State>(&text)?.meeting)?
@@ -607,7 +625,7 @@ pub fn run(config: &Config, meeting_id: &str) -> Result<()> {
     }
     let _awake = crate::awake::Activity::begin("Recording a meeting");
     let mut state = State { pid: std::process::id() as i32, meeting: meeting.id.clone(), backlog_s: None };
-    fs::write(state_path(), serde_json::to_string(&state)?)?;
+    write_state(&state)?;
     let recorder = Recorder::start(&meeting, &config.whisper_model, config.debug).context("can't start recording")?;
     RECORDING.store(true, Ordering::SeqCst);
     let mut next_report = Instant::now() + BACKLOG_EVERY;
@@ -625,7 +643,7 @@ pub fn run(config: &Config, meeting_id: &str) -> Result<()> {
         // In the state file for the menu and `status`, and in the log for problem reports.
         if Instant::now() >= next_state {
             state.backlog_s = Some(recorder.backlog.seconds());
-            let _ = fs::write(state_path(), serde_json::to_string(&state)?);
+            let _ = write_state(&state);
             next_state += Duration::from_secs(5);
         }
         if Instant::now() >= next_report {
@@ -642,7 +660,7 @@ pub fn run(config: &Config, meeting_id: &str) -> Result<()> {
         thread::spawn(move || {
             while !finished.load(Ordering::SeqCst) {
                 state.backlog_s = Some(backlog.seconds());
-                let _ = fs::write(state_path(), serde_json::to_string(&state).unwrap_or_default());
+                let _ = write_state(&state);
                 thread::sleep(Duration::from_millis(500));
             }
         })

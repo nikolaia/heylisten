@@ -79,21 +79,23 @@ impl<'a> Writer<'a> {
         let path = prompt_path();
         let prompt = fs::read_to_string(&path).with_context(|| format!("can't read {}", path.display()))?;
         let parts = split(transcript, self.budget_chars(&prompt));
+        // The prompt says «Meg» is whoever recorded; once Me has a name, «Meg» isn't there.
+        let me = transcript.me.as_ref().map(|me| format!("«{}» er personen som tok opp møtet.\n\n", me.name)).unwrap_or_default();
         if parts.len() == 1 {
-            return self.chat_with_progress(&prompt, &format!("Transkripsjon:\n\n{}", parts[0]), false, on_progress);
+            return self.chat_with_progress(&prompt, &format!("{me}Transkripsjon:\n\n{}", parts[0]), false, on_progress);
         }
         let n = parts.len();
         let mut summaries = Vec::new();
         for (i, part) in parts.iter().enumerate() {
             on_part(i + 1, n);
             let user = format!(
-                "Dette er del {} av {n} av et langt møte. Lag referat bare for denne delen.\n\nTranskripsjon:\n\n{part}",
+                "Dette er del {} av {n} av et langt møte. Lag referat bare for denne delen.\n\n{me}Transkripsjon:\n\n{part}",
                 i + 1
             );
             summaries.push(format!("# Del {}\n\n{}", i + 1, self.chat_with_progress(&prompt, &user, false, on_progress)?));
         }
         let user = format!(
-            "Her er referater av hver del av et langt møte, i rekkefølge. Slå dem sammen til ett referat for hele møtet.\n\n{}",
+            "Her er referater av hver del av et langt møte, i rekkefølge. Slå dem sammen til ett referat for hele møtet.\n\n{me}{}",
             summaries.join("\n\n")
         );
         self.chat_with_progress(&prompt, &user, false, on_progress)

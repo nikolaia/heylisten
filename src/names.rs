@@ -74,7 +74,8 @@ fn candidates(paragraphs: &[Paragraph]) -> Vec<Candidate> {
         let own = speaker(Some(p.who));
         let next = speaker(paragraphs.get(i + 1).map(|q| q.who)).filter(|n| Some(*n) != own);
         let previous = speaker(i.checked_sub(1).map(|j| paragraphs[j].who)).filter(|n| Some(*n) != own);
-        let sentences: Vec<&str> = p.text.split_inclusive(['.', '?', '!']).map(str::trim).filter(|s| !s.is_empty()).collect();
+        // Only pieces with words count as sentences: "starte..." mustn't add two empty ones.
+        let sentences: Vec<&str> = p.text.split_inclusive(['.', '?', '!']).map(str::trim).filter(|s| s.chars().any(char::is_alphanumeric)).collect();
         for (k, sentence) in sentences.iter().enumerate() {
             let question = sentence.ends_with('?');
             let sentence = &sentence.trim_end_matches(['.', '?', '!']);
@@ -286,6 +287,12 @@ mod tests {
         let names = assign(&found, &confirmed(&["Ola"]));
         assert_eq!(names.get(&Who::Speaker(1)).map(|n| n.name.as_str()), Some("Ola"));
         assert!(!names.contains_key(&Who::Speaker(3)));
+    }
+
+    #[test]
+    fn an_ellipsis_is_not_more_sentences() {
+        let found = candidates(&paragraphs(&[(Who::Speaker(1), "Kari, kan du starte..."), (Who::Speaker(2), "Ja.")]));
+        assert_eq!(assign(&found, &confirmed(&["Kari"]))[&Who::Speaker(2)].name, "Kari");
     }
 
     #[test]

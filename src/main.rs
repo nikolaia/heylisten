@@ -87,6 +87,7 @@ fn main() -> ExitCode {
     match result {
         Ok(code) => code,
         Err(e) => {
+            end_progress();
             eprintln!("{} {e:#}", red("error:"));
             ExitCode::FAILURE
         }
@@ -132,10 +133,11 @@ fn watch() -> Result<ExitCode> {
 fn stop(config: &Config, mode: Mode) -> Result<ExitCode> {
     let _awake = heylisten::awake::Activity::begin("Making a meeting note");
     eprintln!("Stopping (finishing the live transcript)…");
-    // The first report is the whole backlog: the bar fills from there.
-    let mut total = None;
+    // The most audio left so far is the whole backlog: the bar fills from there. Not just the
+    // first report, which can be from before the recorder heard the stop.
+    let mut total: f32 = 1.0;
     let meeting = recorder::stop(|left| {
-        let total = *total.get_or_insert(left.max(1.0));
+        total = total.max(left);
         progress("Transcribing the rest", &format!("{} {}", bar(1.0 - left / total), recorder::describe_left(left)));
     })?;
     end_progress();
@@ -196,8 +198,8 @@ fn process(config: &Config, target: &str) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// The label of the progress line that's open, if any.
-static PROGRESS: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// Whether a progress line is open.
+static PROGRESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// A line that redraws in place in a terminal: "Summarizing ▕████░░░░▏ 40%". Piped or logged,
 /// nothing: the step lines around it say what's going on, and a log stays short.
@@ -205,13 +207,13 @@ fn progress(label: &str, detail: &str) {
     if std::io::stderr().is_terminal() {
         eprint!("\r\x1b[2K{label} {detail}");
         let _ = std::io::stderr().flush();
-        *PROGRESS.lock().unwrap() = Some(label.to_string());
+        PROGRESS.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
 /// Ends an open progress line, so the next line starts on its own.
 fn end_progress() {
-    if PROGRESS.lock().unwrap().take().is_some() {
+    if PROGRESS.swap(false, std::sync::atomic::Ordering::Relaxed) {
         eprintln!();
     }
 }
