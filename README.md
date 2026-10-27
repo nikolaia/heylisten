@@ -102,7 +102,8 @@ heylisten status               # recording or idle
 heylisten stop                 # stop and write the note
 heylisten stop --transcript-only   # stop with just the transcript: no speakers, names or summary
 heylisten process memo.m4a     # transcribe an audio file (m4a, mp3, wav, flac, ogg)
-heylisten process <meeting-id> # redo a meeting from its saved audio
+heylisten process <meeting-id> # make a meeting's note again, from what was transcribed live plus the rest of its audio
+heylisten process <meeting-id> --force   # transcribe all of it again from the audio
 heylisten setup                # download the models and the summary engine
 heylisten doctor               # check everything, with copy-paste fixes
 heylisten report               # draft a GitHub issue with the logs (names removed); asks first
@@ -150,6 +151,7 @@ flowchart LR
 - **Language.** Always Norwegian. NB-Whisper translates English speech into Norwegian rather than transcribing it.
 - **Summary.** By default heyListen starts llama.cpp's `llama-server` on localhost just for the summary, then stops it, so the 7 GB model is only in memory while it's needed.
 - **If the summary fails** (for example the model isn't downloaded, or Ollama is down), the note is written without a summary, the audio is kept, and `heylisten process <id>` retries later.
+- **If recording stops unexpectedly** (a crash, a Force Quit), the audio so far is saved and the menu offers to finish the meeting. Finishing keeps what was transcribed live and transcribes only the rest.
 
 Meetings (audio while recording, transcripts, metadata) are kept in `~/Library/Application Support/heylisten/meetings/`. The models are in `~/Library/Application Support/heylisten/models/` and the summary engine in `…/heylisten/engine/`. The vocabulary is in [CONTEXT.md](CONTEXT.md) and the design decisions in [docs/adr](docs/adr).
 

@@ -31,6 +31,9 @@ pub struct Recorder {
     pub backlog: Arc<live::Backlog>,
     /// When the mic last delivered audio (`capture::now_ns`).
     mic_heard: Arc<AtomicU64>,
+    /// Set at stop: the writers finish once their audio stops coming, even if a source never
+    /// closes (a mic that disappeared).
+    stopping: Arc<AtomicBool>,
 }
 
 impl Recorder {
@@ -63,8 +66,9 @@ impl Recorder {
                 Echo::Off
             }
         };
-        let (mic_tx, mic_writer) = track_writer(meeting, Track::Mic, live_tx.clone(), echo, debug)?;
-        let (sys_tx, sys_writer) = track_writer(meeting, Track::System, live_tx, Echo::Reference(loopback), debug)?;
+        let stopping = Arc::new(AtomicBool::new(false));
+        let (mic_tx, mic_writer) = track_writer(meeting, Track::Mic, live_tx.clone(), echo, stopping.clone(), debug)?;
+        let (sys_tx, sys_writer) = track_writer(meeting, Track::System, live_tx, Echo::Reference(loopback), stopping.clone(), debug)?;
         let mic_heard = Arc::new(AtomicU64::new(capture::now_ns()));
         let heard = mic_heard.clone();
         let mic = Mic::start(
@@ -78,7 +82,7 @@ impl Recorder {
         // Always logged, so a bad recording can be traced to the device it came from.
         log(&format!("mic: {} ({} Hz, {} ch)", mic.device, mic.rate, mic.channels));
         log(&format!("system audio: tap of everything except heyListen, output device {}", system.device));
-        Ok(Recorder { mic: Some(mic), system: Some(system), writers: vec![mic_writer, sys_writer], live, backlog, mic_heard })
+        Ok(Recorder { mic: Some(mic), system: Some(system), writers: vec![mic_writer, sys_writer], live, backlog, mic_heard, stopping })
     }
 
     /// Stops capture and waits until both files are complete and the live transcript has caught up.
@@ -86,7 +90,16 @@ impl Recorder {
     pub fn stop(mut self) -> Result<bool> {
         // Dropping the sources drops their senders, which ends the writer threads, which ends
         // the live transcriber once it has worked through its queue.
-        drop(self.mic.take());
+        self.stopping.store(true, Ordering::SeqCst);
+        let mic = self.mic.take();
+        // A mic that disappeared (AirPods put back in their case) went quiet without an error,
+        // and closing it can block inside macOS. Leave it: it goes when the recorder exits.
+        if capture::now_ns().saturating_sub(self.mic_heard.load(Ordering::Relaxed)) > MIC_QUIET_NS {
+            log("mic: quiet, probably disconnected; not waiting to close it");
+            std::mem::forget(mic);
+        } else {
+            drop(mic);
+        }
         drop(self.system.take());
         for w in self.writers.drain(..) {
             w.join().expect("writer thread panicked")?;
@@ -349,6 +362,7 @@ fn track_writer(
     track: Track,
     live: live::Queue,
     echo: Echo,
+    stopping: Arc<AtomicBool>,
     debug: bool,
 ) -> Result<(mpsc::Sender<Audio>, JoinHandle<Result<()>>)> {
     let (tx, rx) = mpsc::channel::<Audio>();
@@ -364,7 +378,15 @@ fn track_writer(
         let (mut got, mut last_log) = (0usize, Instant::now());
         // When the next sample is due, on the capture clock.
         let mut position_ns = start_ns;
-        for (samples, rate, captured) in rx {
+        loop {
+            // Normally the loop ends when the source closes. After stop, it also ends once audio
+            // stops coming, so a source that never closes can't hold the stop up.
+            let (samples, rate, captured) = match rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(audio) => audio,
+                Err(mpsc::RecvTimeoutError::Timeout) if stopping.load(Ordering::SeqCst) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
             got += samples.len();
             if debug && last_log.elapsed() > Duration::from_secs(1) {
                 log(&format!("{:?}: {:5.1}s in, received {:6.2}s of audio at {rate} Hz", track, t0.elapsed().as_secs_f32(), got as f32 / rate as f32));

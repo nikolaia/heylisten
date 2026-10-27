@@ -45,6 +45,9 @@ enum Command {
     Process {
         /// Meeting id, or path to an audio file
         target: String,
+        /// Transcribe everything again from the audio, instead of continuing from the live transcript
+        #[arg(long)]
+        force: bool,
     },
     /// Download the speech model and pull the summary model through Ollama (about 8 GB)
     Setup,
@@ -79,7 +82,7 @@ fn main() -> ExitCode {
         Command::Status => status(),
         Command::Record { meeting } => recorder::run(&config, &meeting).map(|_| ExitCode::SUCCESS),
         Command::Launch { .. } => unreachable!(),
-        Command::Process { target } => process(&config, &target),
+        Command::Process { target, force } => process(&config, &target, force),
         Command::Setup => setup(&config),
         Command::Report => report(&config),
         Command::Doctor => doctor(&config),
@@ -184,7 +187,7 @@ fn status() -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn process(config: &Config, target: &str) -> Result<ExitCode> {
+fn process(config: &Config, target: &str, force: bool) -> Result<ExitCode> {
     let _awake = heylisten::awake::Activity::begin("Making a meeting note");
     let meeting = if Path::new(target).is_file() {
         eprintln!("Importing {target}…");
@@ -194,7 +197,7 @@ fn process(config: &Config, target: &str) -> Result<ExitCode> {
     };
     eprintln!("Meeting {} ({})", meeting.id, meeting.title);
     let id = meeting.id.clone();
-    pipeline::process(&meeting, config, false, Mode::Full, Arc::new(move |e| print_event(&id, e)))?;
+    pipeline::process(&meeting, config, !force, Mode::Full, Arc::new(move |e| print_event(&id, e)))?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -236,6 +239,10 @@ fn print_event(meeting_id: &str, event: Event) {
         Event::SummaryProgress(Progress::Reading(percent)) => progress("Summarizing: reading the meeting", &bar(percent as f32 / 100.0)),
         Event::SummaryProgress(Progress::Writing(words)) => progress("Summarizing:", &format!("{words} words written")),
         Event::LoadingModel => eprintln!("Loading whisper model…"),
+        Event::Resuming { track, from_ms } => {
+            let s = from_ms / 1000;
+            eprintln!("The live transcript has the {} track up to {}:{:02}; transcribing the rest", track.name(), s / 60, s % 60);
+        }
         Event::Diarizing(track) => eprintln!("Telling speakers apart on the {} track…", track.name()),
         Event::DiarizationFailed(track, why) => eprintln!("Couldn't tell speakers apart on the {} track ({why})", track.name()),
         Event::SkippedSilentTrack(track) => {

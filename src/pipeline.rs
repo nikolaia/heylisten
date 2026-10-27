@@ -16,7 +16,7 @@ use crate::note::{self, Summary};
 use crate::names;
 use crate::summarize::{self, Writer};
 use crate::transcribe::Transcriber;
-use crate::transcript::{Transcript, Who};
+use crate::transcript::{Segment, Transcript, Who};
 use crate::vad;
 
 pub enum Event {
@@ -25,6 +25,8 @@ pub enum Event {
     /// That track keeps its "Meg"/"Andre" labels.
     DiarizationFailed(Track, String),
     Transcribing { track: Track, percent: i32 },
+    /// The live transcript has this track up to `from_ms`: only the rest is transcribed.
+    Resuming { track: Track, from_ms: u64 },
     SkippedSilentTrack(Track),
     /// `ollama_url` isn't on this machine: the transcript is about to leave it.
     SendingOffMachine(String),
@@ -65,8 +67,9 @@ pub enum Mode {
     TranscriptOnly,
 }
 
-/// Turns a recorded meeting into a note. With `reuse_live`, a complete live transcript is used
-/// as is; otherwise everything is transcribed again from the saved audio. Returns the note's path.
+/// Turns a recorded meeting into a note. With `reuse_live`, the live transcript is used, and if
+/// it's incomplete only the rest is transcribed; without, everything is transcribed again from the
+/// saved audio. Returns the note's path.
 pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, mode: Mode, on_event: OnEvent) -> Result<PathBuf> {
     let mut tracks = Vec::new();
     let mut found = false;
@@ -91,8 +94,12 @@ pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, mode: Mode,
         meeting.save()?;
     }
 
+    // What the live transcript already has: everything, or everything up to where the recorder
+    // stopped (a crash, a Force Quit). Only the rest is transcribed. Without `reuse_live`, all
+    // of it is done again from the audio.
+    let live: Vec<Segment> = if reuse_live { live::read_from(&meeting.dir(), 0).map(|(segments, _)| segments).unwrap_or_default() } else { Vec::new() };
     let transcript = if reuse_live && meeting.live_complete {
-        Transcript::merge(vec![live::read(&meeting.dir())?])
+        Transcript::merge(vec![live])
     } else {
         if found && tracks.is_empty() {
             bail!("no speech in meeting {} ('{}'): nothing to transcribe", meeting.id, meeting.title);
@@ -110,18 +117,25 @@ pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, mode: Mode,
         // Same as live: chunks cut at pauses keep timestamps (and so speakers) accurate.
         let mut segments = Vec::new();
         for (track, samples) in &tracks {
+            // The live transcript works through its queue in order, so what it lacks is the end.
+            let from_ms = live.iter().filter(|s| s.who == track.who()).map(|s| s.end_ms).max().unwrap_or(0);
+            let from = (from_ms as usize * audio::SAMPLE_RATE as usize / 1000).min(samples.len());
+            if from > 0 {
+                on_event(Event::Resuming { track: *track, from_ms });
+            }
             let mut chunker = Chunker::new(*track)?;
             let mut chunks = Vec::new();
-            chunker.push(samples, &mut chunks);
+            chunker.push(&samples[from..], &mut chunks);
             chunker.finish(&mut chunks);
             for (i, chunk) in chunks.iter().enumerate() {
                 on_event(Event::Transcribing { track: *track, percent: (i * 100 / chunks.len()) as i32 });
-                let offset_ms = chunk.start_sample * 1000 / audio::SAMPLE_RATE as u64;
+                let offset_ms = (from as u64 + chunk.start_sample) * 1000 / audio::SAMPLE_RATE as u64;
                 segments.push(transcriber.transcribe(&chunk.samples, offset_ms, track.who())?);
             }
             on_event(Event::Transcribing { track: *track, percent: 100 });
         }
         on_event(Event::Took("transcription", started.elapsed()));
+        segments.push(live);
         Transcript::merge(segments)
     };
     // Given next to nothing, the summary model invents a meeting. Nothing at all: no note.

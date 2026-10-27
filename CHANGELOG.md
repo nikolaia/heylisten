@@ -2,6 +2,15 @@
 
 What changed in each release. Each release's GitHub page shows its section from this file.
 
+## [Unreleased]
+
+### Added
+- `heylisten process <meeting-id> --force` transcribes all of a meeting again from its audio. Without `--force`, it continues from what the live transcript already has.
+
+### Fixed
+- **Finishing a recording that stopped unexpectedly is quick.** If the recorder crashed or was force-quit, finishing the meeting used to transcribe all of it again from the audio, which for a 44-minute meeting on an M1 Pro looked like a hang, also with **Stop with transcript only**. It now keeps what the live transcript already has and transcribes only the rest: in that meeting, the last 3 minutes.
+- **Stop works after the mic has disappeared**, as when AirPods are put back in their case before stopping. The mic goes quiet without an error, and stop could hang closing it or waiting for its audio; now it leaves a quiet mic alone and doesn't wait for audio that won't come.
+
 ## [0.1.3] - 2026-10-27
 
 Fuller summaries, progress while the note is made, names for everyone, and a tidier menu.
@@ -80,6 +89,7 @@ The first release. heyListen records, transcribes and summarizes Norwegian meeti
 - **Debug mode is on by default** while heyListen is being tuned: it keeps each meeting's audio for 7 days, so a note can be redone. Turn it off in the menu.
 - **Teams mode** (record only Teams, silence the mic while you're muted) isn't in this release.
 
+[Unreleased]: https://github.com/nikolaia/heylisten/compare/v0.1.3...HEAD
 [0.1.3]: https://github.com/nikolaia/heylisten/releases/tag/v0.1.3
 [0.1.2]: https://github.com/nikolaia/heylisten/releases/tag/v0.1.2
 [0.1.1]: https://github.com/nikolaia/heylisten/releases/tag/v0.1.1
