@@ -60,6 +60,7 @@ struct Items {
     summary: Submenu,
     notes_dir: MenuItem,
     debug: CheckMenuItem,
+    about: MenuItem,
     report: MenuItem,
     quit: MenuItem,
 }
@@ -153,6 +154,7 @@ fn run() -> Result<()> {
         summary: Submenu::new("Summary model", true),
         notes_dir: MenuItem::new("Set notes location…", true, None),
         debug: CheckMenuItem::new("Debug mode (keep recordings 7 days)", true, config.debug, None),
+        about: MenuItem::new("About heyListen…", true, None),
         report: MenuItem::new("Report a problem…", true, None),
         quit: MenuItem::new("Quit heyListen", true, None),
     };
@@ -169,6 +171,7 @@ fn run() -> Result<()> {
         &items.notes_dir,
         &PredefinedMenuItem::separator(),
         &items.debug,
+        &items.about,
         &items.report,
         &items.quit,
     ])?;
@@ -242,6 +245,8 @@ fn run() -> Result<()> {
                     if let Err(e) = config.set_debug(t.items.debug.is_checked()) {
                         t.error = Some(format!("Couldn't save debug mode: {e:#}"));
                     }
+                } else if id == t.items.about.id() {
+                    about(&cli, &config);
                 } else if id == t.items.report.id() {
                     report_problem(&config);
                 } else if id == t.items.quit.id() {
@@ -518,6 +523,43 @@ fn reopened(t: &Tray) -> Option<Mode> {
             dialog.set_buttons(MessageButtons::Ok).show();
             None
         }
+    }
+}
+
+const GITHUB: &str = "https://github.com/nikolaia/heylisten";
+
+/// Which heyListen this is, with links to its page and this version's release notes.
+fn about(cli: &Path, config: &Config) {
+    use rfd::{MessageButtons, MessageDialog, MessageDialogResult};
+    // The CLI's own answer, so it's the version of the command line too.
+    let version = Command::new(cli)
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|v| v.trim().strip_prefix("heylisten ").map(str::to_string))
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+    let (github, notes) = ("Open on GitHub", "What's new");
+    let answer = MessageDialog::new()
+        .set_title("About heyListen")
+        .set_description(format!(
+            "heyListen {version}\n\nMeeting notes for Norwegian meetings, made on your Mac: recording, transcription and summaries all stay on it.\n\nNotes go to {}\n\n{GITHUB}\nMIT license",
+            home_as_tilde(&config.notes_dir)
+        ))
+        .set_buttons(MessageButtons::YesNoCancelCustom(github.into(), notes.into(), "Close".into()))
+        .show();
+    if answer == MessageDialogResult::Custom(github.into()) {
+        open(Path::new(GITHUB));
+    } else if answer == MessageDialogResult::Custom(notes.into()) {
+        open(Path::new(&format!("{GITHUB}/releases/tag/v{version}")));
+    }
+}
+
+/// "~/Desktop/meetings" rather than the full path.
+fn home_as_tilde(path: &Path) -> String {
+    match dirs::home_dir().and_then(|home| path.strip_prefix(home).ok().map(Path::to_path_buf)) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
     }
 }
 

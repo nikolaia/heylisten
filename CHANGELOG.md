@@ -5,6 +5,7 @@ What changed in each release. Each release's GitHub page shows its section from 
 ## [Unreleased]
 
 ### Added
+- **About heyListen…** in the menu: the version (as the `heylisten` command reports it), the notes folder, and links to GitHub and that version's release notes.
 - **Progress while making the note.** After stop, the menu and `heylisten stop` show how much is left of catching up on the live transcript ("about 2 min of audio left"), then how far the summary is: reading the meeting (percent), then words written. In a terminal the CLI draws a progress bar; piped or logged, it prints only the steps.
 - **A warning when live transcription falls behind** by more than a minute during a recording, in the menu and in `heylisten status`, mentioning Low Power Mode when it's on. `recorder.log` notes the backlog every minute, and when the mic stops delivering audio.
 

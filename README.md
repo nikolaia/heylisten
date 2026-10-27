@@ -75,6 +75,7 @@ Hei og velkommen, skal vi starte med budsjettet?
 | **Recent notes** | Your last 10 notes; click to open |
 | **Summary model** | Built-in Borealis, or any model in your Ollama |
 | **Set notes location…** | Where notes go (default: Desktop) |
+| **About heyListen…** | The version, with links to GitHub and its release notes |
 
 To have heyListen start with your Mac, add it under System Settings → General → Login Items.
 
