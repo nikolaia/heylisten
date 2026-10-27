@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::CString;
 use std::fs;
+use std::ops::Range;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
@@ -24,8 +25,75 @@ pub struct Turn {
 const THREADS: i32 = 4;
 
 /// Finds who speaks when in 16 kHz mono audio. The number of speakers is detected.
+///
+/// Only where the voice detector heard speech: telling speakers apart costs the same for silence
+/// as for talk, and a track is often mostly silent (your mic while you listen; either side of a
+/// 1:1 while the other talks). The speech is joined with short pauses between the pieces, and
+/// the turns found are mapped back to the recording's own times.
 pub fn diarize(samples: &[f32], debug: bool) -> Result<Vec<Turn>> {
-    diarize_with(samples, Clustering::default(), debug)
+    let speech = crate::vad::speech(samples)?;
+    let (joined, pieces) = join_speech(samples, &speech);
+    let turns = map_back(&diarize_with(&joined, Clustering::default(), false)?, &pieces);
+    if debug {
+        let heard: usize = speech.iter().map(|r| r.len()).sum();
+        crate::recorder::log(&format!("speakers: {:.0} of {:.0} s are speech", heard as f32 / 16_000.0, samples.len() as f32 / 16_000.0));
+        for t in &turns {
+            crate::recorder::log(&format!("turn {:.2}–{:.2} s: speaker {}", t.start_ms as f32 / 1000.0, t.end_ms as f32 / 1000.0, t.speaker));
+        }
+    }
+    Ok(turns)
+}
+
+/// Audio around each stretch of speech, so its edges aren't clipped.
+const SPEECH_PAD: usize = 16_000 / 4;
+/// Silence put between joined stretches, so a pause still looks like one.
+const SPEECH_GAP: usize = 16_000 / 2;
+
+/// A stretch of the recording copied into the joined audio: where it starts in each, and how long.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Piece {
+    joined: usize,
+    original: usize,
+    len: usize,
+}
+
+/// The speech (padded, overlaps merged), joined with SPEECH_GAP of silence between pieces.
+fn join_speech(samples: &[f32], speech: &[Range<usize>]) -> (Vec<f32>, Vec<Piece>) {
+    let mut merged: Vec<Range<usize>> = Vec::new();
+    for r in speech {
+        let r = r.start.saturating_sub(SPEECH_PAD)..(r.end + SPEECH_PAD).min(samples.len());
+        match merged.last_mut() {
+            Some(last) if r.start <= last.end + SPEECH_GAP => last.end = last.end.max(r.end),
+            _ => merged.push(r),
+        }
+    }
+    let mut joined = Vec::new();
+    let mut pieces = Vec::new();
+    for r in merged {
+        if !joined.is_empty() {
+            joined.resize(joined.len() + SPEECH_GAP, 0.0);
+        }
+        pieces.push(Piece { joined: joined.len(), original: r.start, len: r.len() });
+        joined.extend_from_slice(&samples[r]);
+    }
+    (joined, pieces)
+}
+
+/// Turns found in the joined audio, on the recording's own times. A turn running across a gap
+/// becomes one turn per piece; the gaps themselves were silence and are dropped.
+fn map_back(turns: &[Turn], pieces: &[Piece]) -> Vec<Turn> {
+    let ms = |samples: usize| samples as u64 * 1000 / 16_000;
+    let mut out = Vec::new();
+    for t in turns {
+        let (start, end) = (t.start_ms as usize * 16, t.end_ms as usize * 16);
+        for p in pieces {
+            let (from, to) = (start.max(p.joined), end.min(p.joined + p.len));
+            if from < to {
+                out.push(Turn { start_ms: ms(p.original + from - p.joined), end_ms: ms(p.original + to - p.joined), speaker: t.speaker });
+            }
+        }
+    }
+    out
 }
 
 /// How voices are grouped into speakers.
@@ -495,5 +563,23 @@ mod tests {
         let mut speakers = vec![1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 1, 1, 1];
         snap_to_sentences(&mut speakers, &ends);
         assert_eq!(speakers, [1, 1, 1, 1, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn joins_only_speech_and_maps_turns_back() {
+        let samples = vec![0.1f32; 16_000 * 60];
+        // Speech at 10-12 s and 40-45 s; a long silence between.
+        let speech = [16_000 * 10..16_000 * 12, 16_000 * 40..16_000 * 45];
+        let (joined, pieces) = join_speech(&samples, &speech);
+        // 2.5 s and 5.5 s with padding, plus one 0.5 s gap: 8.5 s instead of 60.
+        assert_eq!(joined.len(), 16_000 * 85 / 10);
+        assert_eq!(pieces[1].joined, pieces[0].len + SPEECH_GAP);
+        // A turn in the first piece, and one spanning the gap into the second.
+        let turns = [turn(250, 2_250, 0), turn(2_000, 8_000, 1)];
+        let mapped = map_back(&turns, &pieces);
+        assert_eq!((mapped[0].start_ms, mapped[0].end_ms, mapped[0].speaker), (10_000, 12_000, 0));
+        assert_eq!((mapped[1].start_ms, mapped[1].end_ms, mapped[1].speaker), (11_750, 12_250, 1));
+        assert_eq!((mapped[2].start_ms, mapped[2].end_ms, mapped[2].speaker), (39_750, 44_750, 1));
+        assert_eq!(mapped.len(), 3);
     }
 }

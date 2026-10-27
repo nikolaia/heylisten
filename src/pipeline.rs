@@ -154,10 +154,22 @@ pub fn process(meeting: &Meeting, config: &Config, reuse_live: bool, mode: Mode,
     let mut transcript = transcript;
     let mut others = 0;
     let started = Instant::now();
-    for track in [Track::System, Track::Mic] {
-        let Some((_, samples)) = tracks.iter().find(|(t, _)| *t == track) else { continue };
-        on_event(Event::Diarizing(track));
-        match diarize::diarize(samples, config.debug) {
+    // Both tracks at once: each uses a few cores, and they don't depend on each other until
+    // they're labelled.
+    let order = [Track::System, Track::Mic];
+    let found: Vec<(Track, Result<Vec<diarize::Turn>>)> = std::thread::scope(|scope| {
+        let running: Vec<_> = order
+            .iter()
+            .filter_map(|&track| tracks.iter().find(|(t, _)| *t == track))
+            .map(|(track, samples)| {
+                on_event(Event::Diarizing(*track));
+                (*track, scope.spawn(move || diarize::diarize(samples, config.debug)))
+            })
+            .collect();
+        running.into_iter().map(|(track, job)| (track, job.join().unwrap_or_else(|_| Err(anyhow::anyhow!("crashed"))))).collect()
+    });
+    for (track, turns) in found {
+        match turns {
             Ok(turns) if track == Track::System => others = diarize::label_others(&mut transcript.segments, &turns),
             Ok(turns) => diarize::label_mic(&mut transcript.segments, &turns, others + 1),
             Err(e) => on_event(Event::DiarizationFailed(track, format!("{e:#}"))),

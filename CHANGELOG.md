@@ -8,6 +8,7 @@ What changed in each release. Each release's GitHub page shows its section from 
 - `heylisten process <meeting-id> --force` transcribes all of a meeting again from its audio. Without `--force`, it continues from what the live transcript already has.
 
 ### Fixed
+- **Telling speakers apart is faster**, about 40 % for a long meeting: it only looks at the stretches where someone speaks (a track is often mostly silence: your mic while you listen, either side of a 1:1), and does both tracks at once. On a 44-minute meeting, from 3 minutes to under 2, with the same speakers found.
 - **Finishing a recording that stopped unexpectedly is quick.** If the recorder crashed or was force-quit, finishing the meeting used to transcribe all of it again from the audio, which for a 44-minute meeting on an M1 Pro looked like a hang, also with **Stop with transcript only**. It now keeps what the live transcript already has and transcribes only the rest: in that meeting, the last 3 minutes.
 - **Stop works after the mic has disappeared**, as when AirPods are put back in their case before stopping. The mic goes quiet without an error, and stop could hang closing it or waiting for its audio; now it leaves a quiet mic alone and doesn't wait for audio that won't come.
 

@@ -122,10 +122,15 @@ impl Drop for Vad {
     }
 }
 
-/// Seconds of speech in a whole recording.
-pub fn speech_seconds(samples: &[f32]) -> Result<f32> {
+/// Where the speech is in a whole recording, as sample ranges.
+pub fn speech(samples: &[f32]) -> Result<Vec<Range<usize>>> {
     let mut vad = Vad::new()?;
     let mut ranges = vad.push(samples);
     ranges.extend(vad.finish());
-    Ok(ranges.iter().map(|r| (r.end - r.start) as f32).sum::<f32>() / SAMPLE_RATE as f32)
+    Ok(ranges.into_iter().map(|r| (r.start as usize).min(samples.len())..(r.end as usize).min(samples.len())).collect())
+}
+
+/// Seconds of speech in a whole recording.
+pub fn speech_seconds(samples: &[f32]) -> Result<f32> {
+    Ok(speech(samples)?.iter().map(|r| r.len() as f32).sum::<f32>() / SAMPLE_RATE as f32)
 }
