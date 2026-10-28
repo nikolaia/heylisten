@@ -33,6 +33,8 @@ enum UserEvent {
     /// A step of whatever long-running job is going on.
     Busy(String),
     Done(Result<Option<PathBuf>, String>),
+    /// The Stop button on the "still recording?" notification.
+    StopFromNotification,
 }
 
 /// What the tray shows.
@@ -85,6 +87,12 @@ struct Tray {
     state: State,
     /// While recording: seconds of audio the live transcript hasn't got to yet.
     behind_s: f32,
+    /// While recording: seconds since anyone spoke.
+    quiet_s: f32,
+    /// Whether this quiet stretch has had its reminder.
+    reminded: bool,
+    /// For stopping by itself after a long quiet.
+    proxy: EventLoopProxy<UserEvent>,
     needs: Option<Needs>,
     error: Option<String>,
     recent: Vec<PathBuf>,
@@ -154,6 +162,10 @@ fn run() -> Result<()> {
         let _ = menu_proxy.send_event(UserEvent::Menu(e));
     }));
     spawn_checker(proxy.clone());
+    let notified = std::sync::Mutex::new(proxy.clone());
+    notify::setup(Box::new(move || {
+        let _ = notified.lock().unwrap().send_event(UserEvent::StopFromNotification);
+    }));
 
     let items = Items {
         headline: MenuItem::new("Checking setup…", false, None),
@@ -199,6 +211,9 @@ fn run() -> Result<()> {
                     items: items.take().unwrap(),
                     state: State::Idle,
                     behind_s: 0.0,
+                    quiet_s: 0.0,
+                    reminded: false,
+                    proxy: proxy.clone(),
                     needs: None,
                     error: None,
                     recent: Vec::new(),
@@ -271,6 +286,14 @@ fn run() -> Result<()> {
                     spawn_stop(config.clone(), mode, proxy.clone());
                 }
             }
+            Event::UserEvent(UserEvent::StopFromNotification) => {
+                if let Some(t) = tray.as_mut()
+                    && matches!(t.state, State::Recording(_))
+                {
+                    t.state = State::Busy(Job::Note, "Stopping…".into());
+                    spawn_stop(config.clone(), Mode::Full, proxy.clone());
+                }
+            }
             Event::UserEvent(UserEvent::Checked(needs, recent)) => {
                 if let Some(t) = tray.as_mut() {
                     t.needs = Some(needs);
@@ -340,14 +363,16 @@ impl Tray {
                 log(&format!("recorder for {} stopped unexpectedly; see recorder.log in its meeting folder", meeting.id));
             }
             self.state = match status {
-                Ok(Status::Recording { meeting, behind_s, .. }) => {
+                Ok(Status::Recording { meeting, behind_s, quiet_s, .. }) => {
                     self.behind_s = behind_s;
+                    self.quiet_s = quiet_s;
                     State::Recording(meeting)
                 }
                 Ok(Status::Died { meeting }) => State::Died(meeting),
                 _ => State::Idle,
             };
         }
+        self.remind_or_stop(config);
         let ready = self.needs.as_ref().is_some_and(|n| !n.whisper_model);
         let behind = (self.behind_s >= recorder::BEHIND_WARNING_S).then(|| {
             let power = if heylisten::awake::low_power_mode() { " (Low Power Mode is on)" } else { "" };
@@ -389,10 +414,8 @@ impl Tray {
             State::Recording(m) => {
                 set_text(&self.items.stop, "Stop and make note");
                 set_text(&self.items.stop_quick, "Stop with transcript only");
-                let detail = match &behind {
-                    Some(behind) => format!("{}, {behind}", elapsed(m)),
-                    None => elapsed(m),
-                };
+                let quiet = (self.quiet_s >= recorder::REMIND_AFTER_S).then(|| format!("no one has spoken for {}", recorder::describe_seconds(self.quiet_s)));
+                let detail = [Some(elapsed(m)), quiet, behind].into_iter().flatten().collect::<Vec<_>>().join(", ");
                 (format!("Recording \u{201c}{}\u{201d}", m.title), Some(detail), vec![&self.items.stop, &self.items.stop_quick])
             }
             State::Died(m) => {
@@ -440,6 +463,25 @@ impl Tray {
             None => {}
         }
         self.shown_icon = look;
+    }
+
+    /// A recording nobody has spoken in for a while was probably forgotten: a reminder after
+    /// REMIND_AFTER_S, and after AUTO_STOP_AFTER_S it stops and makes the note.
+    fn remind_or_stop(&mut self, config: &Config) {
+        let State::Recording(m) = &self.state else { return };
+        if self.quiet_s >= recorder::AUTO_STOP_AFTER_S {
+            let body = format!("No one had spoken for {} in \u{201c}{}\u{201d}. Making the note.", recorder::describe_seconds(self.quiet_s), m.title);
+            notify::show("heyListen stopped recording", &body, false);
+            log(&format!("stopped {} after {:.0} s without speech", m.id, self.quiet_s));
+            self.state = State::Busy(Job::Note, "Stopping…".into());
+            spawn_stop(config.clone(), Mode::Full, self.proxy.clone());
+        } else if self.quiet_s >= recorder::REMIND_AFTER_S && !self.reminded {
+            let body = format!("No one has spoken for {} in \u{201c}{}\u{201d}. If the meeting is over, stop to make the note.", recorder::describe_seconds(self.quiet_s), m.title);
+            notify::show("Still recording", &body, true);
+            self.reminded = true;
+        } else if self.quiet_s < recorder::REMIND_AFTER_S {
+            self.reminded = false;
+        }
     }
 
     /// Puts the menu together: what's going on, what can be done now, then the same few
@@ -769,4 +811,112 @@ fn draw(paint: impl Fn(f32) -> ([u8; 3], f32)) -> Icon {
         }
     }
     Icon::from_rgba(rgba, SIZE, SIZE).expect("valid icon")
+}
+
+/// Notifications: the only platform-specific part of the "still recording?" reminder. macOS uses
+/// Apple's UserNotifications; elsewhere this does nothing for now (on Linux, freedesktop
+/// notifications later). The reminder also shows in the menu, so nothing depends on it.
+mod notify {
+    /// What a notification's Stop button does.
+    pub type OnStop = Box<dyn Fn() + Send + Sync>;
+
+    #[cfg(target_os = "macos")]
+    pub use macos::{setup, show};
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn setup(_on_stop: OnStop) {}
+    #[cfg(not(target_os = "macos"))]
+    pub fn show(_title: &str, _body: &str, _with_stop: bool) {}
+
+    #[cfg(target_os = "macos")]
+    mod macos {
+        use std::sync::OnceLock;
+
+        use block2::{DynBlock, RcBlock};
+        use objc2::rc::Retained;
+        use objc2::runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject};
+        use objc2::{AnyThread, define_class, msg_send};
+        use objc2_foundation::{NSArray, NSBundle, NSError, NSSet, NSString};
+        use objc2_user_notifications::{
+            UNAuthorizationOptions, UNMutableNotificationContent, UNNotification, UNNotificationAction, UNNotificationActionOptions,
+            UNNotificationCategory, UNNotificationCategoryOptions, UNNotificationPresentationOptions, UNNotificationRequest,
+            UNNotificationResponse, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
+        };
+
+        const CATEGORY: &str = "recording-quiet";
+        const STOP: &str = "stop";
+        static ON_STOP: OnceLock<super::OnStop> = OnceLock::new();
+
+        define_class!(
+            // SAFETY: NSObject has no subclassing requirements, and Delegate has no Drop.
+            #[unsafe(super(NSObject))]
+            #[name = "HeyListenNotificationDelegate"]
+            struct Delegate;
+
+            unsafe impl NSObjectProtocol for Delegate {}
+
+            unsafe impl UNUserNotificationCenterDelegate for Delegate {
+                #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
+                fn did_receive(&self, _center: &UNUserNotificationCenter, response: &UNNotificationResponse, done: &DynBlock<dyn Fn()>) {
+                    if response.actionIdentifier().to_string() == STOP
+                        && let Some(on_stop) = ON_STOP.get()
+                    {
+                        on_stop();
+                    }
+                    done.call(());
+                }
+
+                // Shown as a banner even if heyListen happens to be the active app.
+                #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
+                fn will_present(&self, _center: &UNUserNotificationCenter, _notification: &UNNotification, done: &DynBlock<dyn Fn(UNNotificationPresentationOptions)>) {
+                    done.call((UNNotificationPresentationOptions::Banner | UNNotificationPresentationOptions::List,));
+                }
+            }
+        );
+
+        /// The notification center, when running as an app: it needs a bundle.
+        fn center() -> Option<Retained<UNUserNotificationCenter>> {
+            NSBundle::mainBundle().bundleIdentifier()?;
+            Some(UNUserNotificationCenter::currentNotificationCenter())
+        }
+
+        /// Sets up the Stop button and asks once whether heyListen may send notifications.
+        pub fn setup(on_stop: super::OnStop) {
+            let Some(center) = center() else { return };
+            let _ = ON_STOP.set(on_stop);
+            let delegate: Retained<Delegate> = unsafe { msg_send![Delegate::alloc(), init] };
+            center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+            // The center only holds its delegate weakly; this one lives as long as the app.
+            std::mem::forget(delegate);
+            let stop = UNNotificationAction::actionWithIdentifier_title_options(
+                &NSString::from_str(STOP),
+                &NSString::from_str("Stop and make note"),
+                UNNotificationActionOptions::empty(),
+            );
+            let category = UNNotificationCategory::categoryWithIdentifier_actions_intentIdentifiers_options(
+                &NSString::from_str(CATEGORY),
+                &NSArray::from_retained_slice(&[stop]),
+                &NSArray::new(),
+                UNNotificationCategoryOptions::empty(),
+            );
+            center.setNotificationCategories(&NSSet::from_retained_slice(&[category]));
+            let asked = RcBlock::new(|_granted: Bool, _error: *mut NSError| {});
+            center.requestAuthorizationWithOptions_completionHandler(UNAuthorizationOptions::Alert, &asked);
+        }
+
+        /// Shows a notification, optionally with the Stop button. One with the same title
+        /// replaces the last.
+        pub fn show(title: &str, body: &str, with_stop: bool) {
+            let Some(center) = center() else { return };
+            let content = UNMutableNotificationContent::new();
+            content.setTitle(&NSString::from_str(title));
+            content.setBody(&NSString::from_str(body));
+            if with_stop {
+                content.setCategoryIdentifier(&NSString::from_str(CATEGORY));
+            }
+            let id = NSString::from_str(&format!("heylisten {title}"));
+            let request = UNNotificationRequest::requestWithIdentifier_content_trigger(&id, &content, None);
+            center.addNotificationRequest_withCompletionHandler(&request, None);
+        }
+    }
 }

@@ -37,11 +37,14 @@ objc2-core-audio = "0.3.2"
 objc2-core-audio-types = "0.3.2"
 objc2-core-foundation = "0.3.2"
 objc2-foundation = "0.3.2"
+# Reminder notifications from the menu bar app.
+objc2-user-notifications = { version = "0.3.2", optional = true }
+block2 = { version = "0.6.2", optional = true }
 whisper-rs = { version = "0.16.0", features = ["metal"] }
 
 [features]
 # The menu bar / tray app. Off by default so the CLI builds without GTK on Linux.
-tray = ["dep:tao", "dep:tray-icon", "dep:rfd"]
+tray = ["dep:tao", "dep:tray-icon", "dep:rfd", "dep:objc2-user-notifications", "dep:block2"]
 
 [[bin]]
 name = "heylisten-tray"

@@ -5,6 +5,7 @@ What changed in each release. Each release's GitHub page shows its section from 
 ## [Unreleased]
 
 ### Added
+- **A reminder for a forgotten recording.** When no one has spoken on either side for 2 minutes, a notification asks whether you're still in a meeting, with a **Stop and make note** button; the menu says so too. After 15 minutes without speech, heyListen stops by itself and makes the note. Without the menu bar app (CLI only), `heylisten status` shows how long it's been quiet, and the recorder stops itself a minute later.
 - `heylisten process <meeting-id> --force` transcribes all of a meeting again from its audio. Without `--force`, it continues from what the live transcript already has.
 
 ### Fixed

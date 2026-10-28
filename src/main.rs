@@ -171,12 +171,15 @@ fn report(config: &Config) -> Result<ExitCode> {
 fn status() -> Result<ExitCode> {
     match recorder::status()? {
         RecorderStatus::Idle => println!("Idle"),
-        RecorderStatus::Recording { meeting, behind_s, .. } => {
+        RecorderStatus::Recording { meeting, behind_s, quiet_s, .. } => {
             let secs = (chrono::Local::now() - meeting.start).num_seconds();
             let elapsed = format!("{:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60);
             println!("Recording '{}' for {elapsed} ({})", meeting.title, meeting.id);
             if behind_s >= recorder::BEHIND_WARNING_S {
                 println!("{}", recorder::behind_warning(behind_s));
+            }
+            if quiet_s >= recorder::REMIND_AFTER_S {
+                println!("No one has spoken for {}. Still in a meeting? If not: heylisten stop", recorder::describe_seconds(quiet_s));
             }
         }
         RecorderStatus::Died { meeting } => {
